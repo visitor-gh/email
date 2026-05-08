@@ -1,4 +1,6 @@
 import express from 'express';
+import path from 'path';
+import fs from 'fs';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
@@ -57,6 +59,17 @@ app.use('/api/emails', emailsRouter);
 app.use('/api/labels', labelsRouter);
 app.use('/api/drafts', draftsRouter);
 app.use('/api/templates', templatesRouter);
+
+// Serve React build in production
+if (process.env.NODE_ENV === 'production') {
+  const clientDist = path.join(__dirname, '..', '..', 'client', 'dist');
+  if (fs.existsSync(clientDist)) {
+    app.use(express.static(clientDist));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(clientDist, 'index.html'));
+    });
+  }
+}
 
 // Error handling
 app.use(notFoundHandler);

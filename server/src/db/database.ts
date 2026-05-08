@@ -103,9 +103,10 @@ let dbInstance: DbWrapper | null = null;
 export async function initializeDb(): Promise<void> {
   if (dbInstance) return;
 
-  const sqlJsPkg = require.resolve('sql.js/package.json');
-  const sqlJsRoot = path.dirname(sqlJsPkg);
-  const wasmBinary = fs.readFileSync(path.join(sqlJsRoot, 'dist', 'sql-wasm.wasm'));
+  // require.resolve('sql.js') → .../node_modules/sql.js/dist/sql-wasm.js
+  const sqlJsMain = require.resolve('sql.js');
+  const sqlJsDistDir = path.dirname(sqlJsMain);
+  const wasmBinary = fs.readFileSync(path.join(sqlJsDistDir, 'sql-wasm.wasm'));
 
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const initSqlJs = require('sql.js');

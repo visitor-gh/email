@@ -155,12 +155,10 @@ router.get(
       params.push(labelId);
     }
 
-    // Full text search
     if (q) {
-      whereConditions.push(`e.id IN (
-        SELECT id FROM emails_fts WHERE emails_fts MATCH ?
-      )`);
-      params.push(`"${q.replace(/"/g, '""')}"`);
+      whereConditions.push(`(e.subject LIKE ? OR e.from_address LIKE ? OR e.body_text LIKE ?)`);
+      const likeQ = `%${q}%`;
+      params.push(likeQ, likeQ, likeQ);
     }
 
     const joinClause = labelId ? 'JOIN email_labels el ON e.id = el.email_id' : '';
@@ -474,45 +472,23 @@ router.get(
     }
 
     const offset = (parseInt(page) - 1) * parseInt(limit);
-    const params: unknown[] = [`"${q.replace(/"/g, '""')}"`];
+    const likeQ = `%${q}%`;
 
-    let whereClause = 'WHERE e.is_deleted = 0';
+    let baseWhere = 'e.is_deleted = 0 AND (e.subject LIKE ? OR e.from_address LIKE ? OR e.body_text LIKE ?)';
+    const searchParams: unknown[] = [likeQ, likeQ, likeQ];
+
     if (accountId) {
-      whereClause += ' AND e.account_id = ?';
-      params.push(accountId);
+      baseWhere += ' AND e.account_id = ?';
+      searchParams.push(accountId);
     }
 
-    const searchQuery = `
-      SELECT DISTINCT e.* FROM emails e
-      JOIN emails_fts fts ON e.id = fts.id
-      ${whereClause} AND emails_fts MATCH ?
-      ORDER BY e.date DESC
-      LIMIT ? OFFSET ?
-    `;
+    const countResult = db
+      .prepare(`SELECT COUNT(DISTINCT e.id) as total FROM emails e WHERE ${baseWhere}`)
+      .get(...searchParams as []) as { total: number };
 
-    // Reorder params for this query
-    const searchParams = accountId
-      ? [accountId, `"${q.replace(/"/g, '""')}"`, parseInt(limit), offset]
-      : [`"${q.replace(/"/g, '""')}"`, parseInt(limit), offset];
-
-    const baseWhere = accountId ? 'e.is_deleted = 0 AND e.account_id = ?' : 'e.is_deleted = 0';
-    const countParams = accountId ? [accountId, `"${q.replace(/"/g, '""')}"`] : [`"${q.replace(/"/g, '""')}"`];
-
-    const countQuery = `
-      SELECT COUNT(DISTINCT e.id) as total FROM emails e
-      JOIN emails_fts fts ON e.id = fts.id
-      WHERE ${baseWhere} AND emails_fts MATCH ?
-    `;
-
-    const countResult = db.prepare(countQuery).get(...countParams as []) as { total: number };
     const rows = db
-      .prepare(
-        `SELECT DISTINCT e.* FROM emails e
-         JOIN emails_fts fts ON e.id = fts.id
-         WHERE ${baseWhere} AND emails_fts MATCH ?
-         ORDER BY e.date DESC LIMIT ? OFFSET ?`
-      )
-      .all(...countParams as [], parseInt(limit), offset) as EmailRow[];
+      .prepare(`SELECT DISTINCT e.* FROM emails e WHERE ${baseWhere} ORDER BY e.date DESC LIMIT ? OFFSET ?`)
+      .all(...searchParams as [], parseInt(limit), offset) as EmailRow[];
 
     const emails = rows.map(rowToEmail);
 

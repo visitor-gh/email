@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
 
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
+import { initializeDb } from './db/database';
 import { initializeSchema } from './db/schema';
 
 import accountsRouter from './routes/accounts';
@@ -45,9 +46,6 @@ app.use('/api', limiter);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Initialize DB
-initializeSchema();
-
 // Health check
 app.get('/health', (_req, res) => {
   res.json({ success: true, status: 'ok', timestamp: new Date().toISOString() });
@@ -64,9 +62,18 @@ app.use('/api/templates', templatesRouter);
 app.use(notFoundHandler);
 app.use(errorHandler);
 
-app.listen(PORT, () => {
-  console.log(`✅ 서버가 포트 ${PORT}에서 실행 중입니다`);
-  console.log(`   환경: ${process.env.NODE_ENV || 'development'}`);
+async function start() {
+  await initializeDb();
+  initializeSchema();
+  app.listen(PORT, () => {
+    console.log(`✅ 서버가 포트 ${PORT}에서 실행 중입니다`);
+    console.log(`   환경: ${process.env.NODE_ENV || 'development'}`);
+  });
+}
+
+start().catch(err => {
+  console.error('서버 시작 실패:', err);
+  process.exit(1);
 });
 
 export default app;

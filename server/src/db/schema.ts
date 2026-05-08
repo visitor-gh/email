@@ -1,4 +1,5 @@
 import { getDb } from './database';
+// Note: FTS5 removed; LIKE-based search used instead
 
 export function initializeSchema(): void {
   const db = getDb();
@@ -129,39 +130,6 @@ export function initializeSchema(): void {
     )
   `);
 
-  // Full-text search virtual table
-  db.exec(`
-    CREATE VIRTUAL TABLE IF NOT EXISTS emails_fts USING fts5(
-      id UNINDEXED,
-      subject,
-      from_address,
-      to_addresses,
-      body_text,
-      snippet,
-      content=emails,
-      content_rowid=rowid
-    )
-  `);
-
-  // Triggers to keep FTS in sync
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS emails_ai AFTER INSERT ON emails BEGIN
-      INSERT INTO emails_fts(rowid, id, subject, from_address, to_addresses, body_text, snippet)
-      VALUES (new.rowid, new.id, new.subject, new.from_address, new.to_addresses, new.body_text, new.snippet);
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS emails_ad AFTER DELETE ON emails BEGIN
-      INSERT INTO emails_fts(emails_fts, rowid, id, subject, from_address, to_addresses, body_text, snippet)
-      VALUES ('delete', old.rowid, old.id, old.subject, old.from_address, old.to_addresses, old.body_text, old.snippet);
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS emails_au AFTER UPDATE ON emails BEGIN
-      INSERT INTO emails_fts(emails_fts, rowid, id, subject, from_address, to_addresses, body_text, snippet)
-      VALUES ('delete', old.rowid, old.id, old.subject, old.from_address, old.to_addresses, old.body_text, old.snippet);
-      INSERT INTO emails_fts(rowid, id, subject, from_address, to_addresses, body_text, snippet)
-      VALUES (new.rowid, new.id, new.subject, new.from_address, new.to_addresses, new.body_text, new.snippet);
-    END;
-  `);
 
   // Seed system labels
   const now = new Date().toISOString();

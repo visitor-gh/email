@@ -44,7 +44,7 @@ function rowToEmail(row: EmailRow): Email {
     priority: row.priority,
     date: row.date,
     inReplyTo: row.in_reply_to || undefined,
-    references: row.references ? JSON.parse(row.references) : undefined,
+    references: row.email_references ? JSON.parse(row.email_references) : undefined,
     snippet: row.snippet || undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -312,7 +312,7 @@ router.post(
 
     db.prepare(
       `INSERT INTO emails (id, account_id, thread_id, message_id, subject, from_address, to_addresses, cc_addresses, bcc_addresses,
-       body, body_text, attachments, is_read, is_starred, is_important, is_archived, is_deleted, is_draft, priority, date, in_reply_to, references, snippet, created_at, updated_at)
+       body, body_text, attachments, is_read, is_starred, is_important, is_archived, is_deleted, is_draft, priority, date, in_reply_to, email_references, snippet, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', 1, 0, 0, 0, 0, 0, 'normal', ?, ?, ?, ?, ?, ?)`
     ).run(
       emailId, accountId, finalThreadId, sentMessageId || emailId,

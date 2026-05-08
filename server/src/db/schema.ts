@@ -52,7 +52,7 @@ export function initializeSchema(): void {
       priority TEXT NOT NULL DEFAULT 'normal',
       date TEXT NOT NULL,
       in_reply_to TEXT,
-      references TEXT,
+      email_references TEXT,
       snippet TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,

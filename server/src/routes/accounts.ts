@@ -268,7 +268,7 @@ router.post(
         `INSERT OR REPLACE INTO emails
           (id, account_id, thread_id, message_id, subject, from_address, to_addresses, cc_addresses, bcc_addresses,
            reply_to, body, body_text, attachments, is_read, is_starred, is_important, is_archived, is_deleted, is_draft,
-           priority, date, in_reply_to, references, snippet, created_at, updated_at)
+           priority, date, in_reply_to, email_references, snippet, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
 
@@ -311,7 +311,7 @@ router.post(
         `INSERT OR REPLACE INTO emails
           (id, account_id, thread_id, message_id, subject, from_address, to_addresses, cc_addresses, bcc_addresses,
            reply_to, body, body_text, attachments, is_read, is_starred, is_important, is_archived, is_deleted, is_draft,
-           priority, date, in_reply_to, references, snippet, created_at, updated_at)
+           priority, date, in_reply_to, email_references, snippet, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
 

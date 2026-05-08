@@ -106,10 +106,10 @@ export async function fetchImapMessages(
 
                   const fromAddr = parsed.from?.value?.[0];
                   const toAddrs = parsed.to
-                    ? Array.isArray(parsed.to.value) ? parsed.to.value : [parsed.to.value]
+                    ? (Array.isArray(parsed.to) ? parsed.to.flatMap((a: { value: { name: string; address?: string }[] }) => a.value) : parsed.to.value)
                     : [];
                   const ccAddrs = parsed.cc
-                    ? Array.isArray(parsed.cc.value) ? parsed.cc.value : [parsed.cc.value]
+                    ? (Array.isArray(parsed.cc) ? parsed.cc.flatMap((a: { value: { name: string; address?: string }[] }) => a.value) : parsed.cc.value)
                     : [];
 
                   const attachments: Attachment[] = (parsed.attachments || []).map(att => ({
@@ -135,8 +135,8 @@ export async function fetchImapMessages(
                     from: fromAddr
                       ? { name: fromAddr.name, email: fromAddr.address || '' }
                       : { email: '' },
-                    to: toAddrs.map(a => ({ name: a.name, email: a.address || '' })),
-                    cc: ccAddrs.map(a => ({ name: a.name, email: a.address || '' })),
+                    to: toAddrs.map((a: { name?: string; address?: string }) => ({ name: a.name, email: a.address || '' })),
+                    cc: ccAddrs.map((a: { name?: string; address?: string }) => ({ name: a.name, email: a.address || '' })),
                     bcc: [],
                     body: htmlBody || `<pre>${textBody}</pre>`,
                     bodyText: textBody,

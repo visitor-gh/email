@@ -102,7 +102,7 @@ export interface EmailRow {
   priority: Priority;
   date: string;
   in_reply_to: string | null;
-  references: string | null;
+  email_references: string | null;
   snippet: string | null;
   created_at: string;
   updated_at: string;

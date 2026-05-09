@@ -1,11 +1,10 @@
-import { getDb } from './database';
-// Note: FTS5 removed; LIKE-based search used instead
+import { getDb, initializeDb } from './database';
 
-export function initializeSchema(): void {
+export async function initializeSchema(): Promise<void> {
   const db = getDb();
 
   // Accounts table
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS accounts (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -29,7 +28,7 @@ export function initializeSchema(): void {
   `);
 
   // Emails table
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS emails (
       id TEXT PRIMARY KEY,
       account_id TEXT NOT NULL,
@@ -62,19 +61,17 @@ export function initializeSchema(): void {
   `);
 
   // Indexes for emails
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_emails_account_id ON emails(account_id);
-    CREATE INDEX IF NOT EXISTS idx_emails_thread_id ON emails(thread_id);
-    CREATE INDEX IF NOT EXISTS idx_emails_date ON emails(date DESC);
-    CREATE INDEX IF NOT EXISTS idx_emails_is_read ON emails(is_read);
-    CREATE INDEX IF NOT EXISTS idx_emails_is_starred ON emails(is_starred);
-    CREATE INDEX IF NOT EXISTS idx_emails_is_deleted ON emails(is_deleted);
-    CREATE INDEX IF NOT EXISTS idx_emails_is_archived ON emails(is_archived);
-    CREATE INDEX IF NOT EXISTS idx_emails_is_draft ON emails(is_draft);
-  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_emails_account_id ON emails(account_id)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_emails_thread_id ON emails(thread_id)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_emails_date ON emails(date DESC)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_emails_is_read ON emails(is_read)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_emails_is_starred ON emails(is_starred)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_emails_is_deleted ON emails(is_deleted)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_emails_is_archived ON emails(is_archived)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_emails_is_draft ON emails(is_draft)`);
 
   // Labels table
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS labels (
       id TEXT PRIMARY KEY,
       account_id TEXT,
@@ -88,7 +85,7 @@ export function initializeSchema(): void {
   `);
 
   // Email labels junction table
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS email_labels (
       email_id TEXT NOT NULL,
       label_id TEXT NOT NULL,
@@ -99,7 +96,7 @@ export function initializeSchema(): void {
   `);
 
   // Drafts table
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS drafts (
       id TEXT PRIMARY KEY,
       account_id TEXT NOT NULL,
@@ -118,7 +115,7 @@ export function initializeSchema(): void {
   `);
 
   // Templates table
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS templates (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -129,7 +126,6 @@ export function initializeSchema(): void {
       updated_at TEXT NOT NULL
     )
   `);
-
 
   // Seed system labels
   const now = new Date().toISOString();
@@ -143,21 +139,16 @@ export function initializeSchema(): void {
     { id: 'label_spam', name: '스팸함', color: '#EC4899', isSystem: 1 },
   ];
 
-  const insertLabel = db.prepare(`
-    INSERT OR IGNORE INTO labels (id, account_id, name, color, is_system, created_at, updated_at)
-    VALUES (?, NULL, ?, ?, ?, ?, ?)
-  `);
-
   for (const label of systemLabels) {
-    insertLabel.run(label.id, label.name, label.color, label.isSystem, now, now);
+    await db.run(
+      `INSERT INTO labels (id, account_id, name, color, is_system, created_at, updated_at)
+       VALUES ($1, NULL, $2, $3, $4, $5, $6)
+       ON CONFLICT (id) DO NOTHING`,
+      [label.id, label.name, label.color, label.isSystem, now, now]
+    );
   }
 
   // Seed default templates
-  const insertTemplate = db.prepare(`
-    INSERT OR IGNORE INTO templates (id, name, subject, body, category, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-
   const defaultTemplates = [
     {
       id: 'tmpl_001',
@@ -190,7 +181,12 @@ export function initializeSchema(): void {
   ];
 
   for (const tmpl of defaultTemplates) {
-    insertTemplate.run(tmpl.id, tmpl.name, tmpl.subject, tmpl.body, tmpl.category, now, now);
+    await db.run(
+      `INSERT INTO templates (id, name, subject, body, category, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (id) DO NOTHING`,
+      [tmpl.id, tmpl.name, tmpl.subject, tmpl.body, tmpl.category, now, now]
+    );
   }
 
   console.log('Database schema initialized successfully');
@@ -198,6 +194,9 @@ export function initializeSchema(): void {
 
 // Run directly if called as main
 if (require.main === module) {
-  initializeSchema();
-  process.exit(0);
+  (async () => {
+    await initializeDb();
+    await initializeSchema();
+    process.exit(0);
+  })();
 }

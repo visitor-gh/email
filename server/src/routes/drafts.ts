@@ -39,10 +39,9 @@ router.get(
       query += ' WHERE account_id = ?';
       params.push(accountId);
     }
-
     query += ' ORDER BY updated_at DESC';
 
-    const rows = db.prepare(query).all(...params as []) as DraftRow[];
+    const rows = await db.all<DraftRow>(query, params);
     res.json({ success: true, data: rows.map(rowToDraft) } as ApiResponse<Draft[]>);
   })
 );
@@ -52,16 +51,13 @@ router.get(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
     const db = getDb();
-    const row = db
-      .prepare('SELECT * FROM drafts WHERE id = ?')
-      .get(req.params.id) as DraftRow | undefined;
-
+    const row = await db.get<DraftRow>('SELECT * FROM drafts WHERE id = ?', [req.params.id]);
     if (!row) throw new AppError('임시저장을 찾을 수 없습니다', 404);
     res.json({ success: true, data: rowToDraft(row) } as ApiResponse<Draft>);
   })
 );
 
-// POST /api/drafts - Save draft
+// POST /api/drafts
 router.post(
   '/',
   [body('accountId').notEmpty().withMessage('계정을 선택해주세요')],
@@ -69,41 +65,33 @@ router.post(
   asyncHandler(async (req: Request, res: Response) => {
     const db = getDb();
     const { accountId, subject = '', to = [], cc = [], bcc = [], body: draftBody = '', attachments = [], inReplyTo, threadId } = req.body;
-
     const now = new Date().toISOString();
     const id = uuidv4();
 
-    db.prepare(
+    await db.run(
       `INSERT INTO drafts (id, account_id, subject, to_addresses, cc_addresses, bcc_addresses, body, attachments, in_reply_to, thread_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      id, accountId, subject,
-      JSON.stringify(to), JSON.stringify(cc), JSON.stringify(bcc),
-      draftBody, JSON.stringify(attachments),
-      inReplyTo || null, threadId || null,
-      now, now
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, accountId, subject, JSON.stringify(to), JSON.stringify(cc), JSON.stringify(bcc),
+       draftBody, JSON.stringify(attachments), inReplyTo || null, threadId || null, now, now]
     );
 
-    const row = db.prepare('SELECT * FROM drafts WHERE id = ?').get(id) as DraftRow;
-    res.status(201).json({ success: true, data: rowToDraft(row) } as ApiResponse<Draft>);
+    const row = await db.get<DraftRow>('SELECT * FROM drafts WHERE id = ?', [id]);
+    res.status(201).json({ success: true, data: rowToDraft(row!) } as ApiResponse<Draft>);
   })
 );
 
-// PUT /api/drafts/:id - Update draft
+// PUT /api/drafts/:id
 router.put(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
     const db = getDb();
-    const existing = db
-      .prepare('SELECT * FROM drafts WHERE id = ?')
-      .get(req.params.id) as DraftRow | undefined;
-
+    const existing = await db.get<DraftRow>('SELECT * FROM drafts WHERE id = ?', [req.params.id]);
     if (!existing) throw new AppError('임시저장을 찾을 수 없습니다', 404);
 
     const { subject, to, cc, bcc, body: draftBody, attachments, inReplyTo, threadId } = req.body;
     const now = new Date().toISOString();
 
-    db.prepare(
+    await db.run(
       `UPDATE drafts SET
         subject = COALESCE(?, subject),
         to_addresses = COALESCE(?, to_addresses),
@@ -114,21 +102,22 @@ router.put(
         in_reply_to = COALESCE(?, in_reply_to),
         thread_id = COALESCE(?, thread_id),
         updated_at = ?
-       WHERE id = ?`
-    ).run(
-      subject !== undefined ? subject : null,
-      to !== undefined ? JSON.stringify(to) : null,
-      cc !== undefined ? JSON.stringify(cc) : null,
-      bcc !== undefined ? JSON.stringify(bcc) : null,
-      draftBody !== undefined ? draftBody : null,
-      attachments !== undefined ? JSON.stringify(attachments) : null,
-      inReplyTo !== undefined ? inReplyTo : null,
-      threadId !== undefined ? threadId : null,
-      now, req.params.id
+       WHERE id = ?`,
+      [
+        subject !== undefined ? subject : null,
+        to !== undefined ? JSON.stringify(to) : null,
+        cc !== undefined ? JSON.stringify(cc) : null,
+        bcc !== undefined ? JSON.stringify(bcc) : null,
+        draftBody !== undefined ? draftBody : null,
+        attachments !== undefined ? JSON.stringify(attachments) : null,
+        inReplyTo !== undefined ? inReplyTo : null,
+        threadId !== undefined ? threadId : null,
+        now, req.params.id,
+      ]
     );
 
-    const row = db.prepare('SELECT * FROM drafts WHERE id = ?').get(req.params.id) as DraftRow;
-    res.json({ success: true, data: rowToDraft(row) } as ApiResponse<Draft>);
+    const row = await db.get<DraftRow>('SELECT * FROM drafts WHERE id = ?', [req.params.id]);
+    res.json({ success: true, data: rowToDraft(row!) } as ApiResponse<Draft>);
   })
 );
 
@@ -137,13 +126,10 @@ router.delete(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
     const db = getDb();
-    const existing = db
-      .prepare('SELECT * FROM drafts WHERE id = ?')
-      .get(req.params.id) as DraftRow | undefined;
-
+    const existing = await db.get<DraftRow>('SELECT * FROM drafts WHERE id = ?', [req.params.id]);
     if (!existing) throw new AppError('임시저장을 찾을 수 없습니다', 404);
 
-    db.prepare('DELETE FROM drafts WHERE id = ?').run(req.params.id);
+    await db.run('DELETE FROM drafts WHERE id = ?', [req.params.id]);
     res.json({ success: true, message: '임시저장을 삭제했습니다' });
   })
 );

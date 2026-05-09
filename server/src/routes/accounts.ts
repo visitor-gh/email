@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { body, param } from 'express-validator';
 import { v4 as uuidv4 } from 'uuid';
-import { getDb } from '../db/database';
+import { getDb, convertToNumberedParams } from '../db/database';
 import { validate } from '../middleware/validate';
 import { asyncHandler, AppError } from '../middleware/errorHandler';
 import { getAuthUrl, exchangeCodeForTokens } from '../services/gmail';
@@ -38,23 +38,22 @@ router.get(
   '/',
   asyncHandler(async (_req: Request, res: Response) => {
     const db = getDb();
-    const rows = db.prepare('SELECT * FROM accounts ORDER BY created_at ASC').all() as AccountRow[];
+    const rows = await db.all<AccountRow>('SELECT * FROM accounts ORDER BY created_at ASC');
 
-    const accounts = rows.map(row => {
+    const accounts = await Promise.all(rows.map(async row => {
       const acc = rowToAccount(row);
       // Count unread emails
-      const unreadCount = db
-        .prepare(
-          "SELECT COUNT(*) as count FROM emails WHERE account_id = ? AND is_read = 0 AND is_deleted = 0 AND is_archived = 0 AND is_draft = 0"
-        )
-        .get(row.id) as { count: number };
-      acc.unreadCount = unreadCount.count;
+      const unreadCount = await db.get<{ count: number }>(
+        "SELECT COUNT(*) as count FROM emails WHERE account_id = ? AND is_read = 0 AND is_deleted = 0 AND is_archived = 0 AND is_draft = 0",
+        [row.id]
+      );
+      acc.unreadCount = unreadCount?.count ?? 0;
       // Don't expose tokens
       delete acc.accessToken;
       delete acc.refreshToken;
       delete acc.password;
       return acc;
-    });
+    }));
 
     const response: ApiResponse<Account[]> = { success: true, data: accounts };
     res.json(response);
@@ -66,9 +65,7 @@ router.get(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
     const db = getDb();
-    const row = db
-      .prepare('SELECT * FROM accounts WHERE id = ?')
-      .get(req.params.id) as AccountRow | undefined;
+    const row = await db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [req.params.id]);
 
     if (!row) throw new AppError('계정을 찾을 수 없습니다', 404);
 
@@ -110,24 +107,24 @@ router.get(
     const now = new Date().toISOString();
 
     // Check if account already exists
-    const existing = db
-      .prepare('SELECT * FROM accounts WHERE email = ?')
-      .get(tokens.email) as AccountRow | undefined;
+    const existing = await db.get<AccountRow>('SELECT * FROM accounts WHERE email = ?', [tokens.email]);
 
     let accountId: string;
 
     if (existing) {
       // Update tokens
-      db.prepare(
-        `UPDATE accounts SET access_token = ?, refresh_token = ?, token_expiry = ?, updated_at = ? WHERE id = ?`
-      ).run(tokens.accessToken, tokens.refreshToken, tokens.tokenExpiry, now, existing.id);
+      await db.run(
+        `UPDATE accounts SET access_token = ?, refresh_token = ?, token_expiry = ?, updated_at = ? WHERE id = ?`,
+        [tokens.accessToken, tokens.refreshToken, tokens.tokenExpiry, now, existing.id]
+      );
       accountId = existing.id;
     } else {
       accountId = uuidv4();
-      db.prepare(
+      await db.run(
         `INSERT INTO accounts (id, name, email, type, access_token, refresh_token, token_expiry, is_active, created_at, updated_at)
-         VALUES (?, ?, ?, 'gmail', ?, ?, ?, 1, ?, ?)`
-      ).run(accountId, tokens.name, tokens.email, tokens.accessToken, tokens.refreshToken, tokens.tokenExpiry, now, now);
+         VALUES (?, ?, ?, 'gmail', ?, ?, ?, 1, ?, ?)`,
+        [accountId, tokens.name, tokens.email, tokens.accessToken, tokens.refreshToken, tokens.tokenExpiry, now, now]
+      );
     }
 
     const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
@@ -163,16 +160,15 @@ router.post(
     const now = new Date().toISOString();
     const id = uuidv4();
 
-    db.prepare(
+    await db.run(
       `INSERT INTO accounts (id, name, email, type, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, password, signature, is_active, created_at, updated_at)
-       VALUES (?, ?, ?, 'imap', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
-    ).run(
-      id, name, email, imapHost, imapPort, imapSecure !== false ? 1 : 0,
-      smtpHost, smtpPort, smtpSecure !== false ? 1 : 0, password, signature || null, now, now
+       VALUES (?, ?, ?, 'imap', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+      [id, name, email, imapHost, imapPort, imapSecure !== false ? 1 : 0,
+       smtpHost, smtpPort, smtpSecure !== false ? 1 : 0, password, signature || null, now, now]
     );
 
-    const row = db.prepare('SELECT * FROM accounts WHERE id = ?').get(id) as AccountRow;
-    const acc = rowToAccount(row);
+    const row = await db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [id]);
+    const acc = rowToAccount(row!);
     delete acc.password;
 
     res.status(201).json({ success: true, data: acc } as ApiResponse<Account>);
@@ -186,16 +182,14 @@ router.put(
   validate,
   asyncHandler(async (req: Request, res: Response) => {
     const db = getDb();
-    const existing = db
-      .prepare('SELECT * FROM accounts WHERE id = ?')
-      .get(req.params.id) as AccountRow | undefined;
+    const existing = await db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [req.params.id]);
 
     if (!existing) throw new AppError('계정을 찾을 수 없습니다', 404);
 
     const { name, signature, imapHost, imapPort, imapSecure, smtpHost, smtpPort, smtpSecure, password, isActive } = req.body;
     const now = new Date().toISOString();
 
-    db.prepare(
+    await db.run(
       `UPDATE accounts SET
         name = COALESCE(?, name),
         signature = COALESCE(?, signature),
@@ -208,20 +202,21 @@ router.put(
         password = COALESCE(?, password),
         is_active = COALESCE(?, is_active),
         updated_at = ?
-       WHERE id = ?`
-    ).run(
-      name || null, signature !== undefined ? signature : null,
-      imapHost || null, imapPort || null,
-      imapSecure !== undefined ? (imapSecure ? 1 : 0) : null,
-      smtpHost || null, smtpPort || null,
-      smtpSecure !== undefined ? (smtpSecure ? 1 : 0) : null,
-      password || null,
-      isActive !== undefined ? (isActive ? 1 : 0) : null,
-      now, req.params.id
+       WHERE id = ?`,
+      [
+        name || null, signature !== undefined ? signature : null,
+        imapHost || null, imapPort || null,
+        imapSecure !== undefined ? (imapSecure ? 1 : 0) : null,
+        smtpHost || null, smtpPort || null,
+        smtpSecure !== undefined ? (smtpSecure ? 1 : 0) : null,
+        password || null,
+        isActive !== undefined ? (isActive ? 1 : 0) : null,
+        now, req.params.id
+      ]
     );
 
-    const row = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id) as AccountRow;
-    const acc = rowToAccount(row);
+    const row = await db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [req.params.id]);
+    const acc = rowToAccount(row!);
     delete acc.accessToken;
     delete acc.refreshToken;
     delete acc.password;
@@ -235,13 +230,11 @@ router.delete(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
     const db = getDb();
-    const existing = db
-      .prepare('SELECT * FROM accounts WHERE id = ?')
-      .get(req.params.id) as AccountRow | undefined;
+    const existing = await db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [req.params.id]);
 
     if (!existing) throw new AppError('계정을 찾을 수 없습니다', 404);
 
-    db.prepare('DELETE FROM accounts WHERE id = ?').run(req.params.id);
+    await db.run('DELETE FROM accounts WHERE id = ?', [req.params.id]);
     res.json({ success: true, message: '계정이 삭제되었습니다' });
   })
 );
@@ -251,9 +244,7 @@ router.post(
   '/:id/sync',
   asyncHandler(async (req: Request, res: Response) => {
     const db = getDb();
-    const row = db
-      .prepare('SELECT * FROM accounts WHERE id = ?')
-      .get(req.params.id) as AccountRow | undefined;
+    const row = await db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [req.params.id]);
 
     if (!row) throw new AppError('계정을 찾을 수 없습니다', 404);
 
@@ -264,17 +255,43 @@ router.post(
       const { fetchGmailMessages } = await import('../services/gmail');
       const { emails } = await fetchGmailMessages(account, { maxResults: 100 });
 
-      const insertEmail = db.prepare(
-        `INSERT OR REPLACE INTO emails
+      const insertSql = `INSERT INTO emails
           (id, account_id, thread_id, message_id, subject, from_address, to_addresses, cc_addresses, bcc_addresses,
            reply_to, body, body_text, attachments, is_read, is_starred, is_important, is_archived, is_deleted, is_draft,
            priority, date, in_reply_to, email_references, snippet, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      );
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET
+           account_id = EXCLUDED.account_id,
+           thread_id = EXCLUDED.thread_id,
+           message_id = EXCLUDED.message_id,
+           subject = EXCLUDED.subject,
+           from_address = EXCLUDED.from_address,
+           to_addresses = EXCLUDED.to_addresses,
+           cc_addresses = EXCLUDED.cc_addresses,
+           bcc_addresses = EXCLUDED.bcc_addresses,
+           reply_to = EXCLUDED.reply_to,
+           body = EXCLUDED.body,
+           body_text = EXCLUDED.body_text,
+           attachments = EXCLUDED.attachments,
+           is_read = EXCLUDED.is_read,
+           is_starred = EXCLUDED.is_starred,
+           is_important = EXCLUDED.is_important,
+           is_archived = EXCLUDED.is_archived,
+           is_deleted = EXCLUDED.is_deleted,
+           is_draft = EXCLUDED.is_draft,
+           priority = EXCLUDED.priority,
+           date = EXCLUDED.date,
+           in_reply_to = EXCLUDED.in_reply_to,
+           email_references = EXCLUDED.email_references,
+           snippet = EXCLUDED.snippet,
+           created_at = EXCLUDED.created_at,
+           updated_at = EXCLUDED.updated_at`;
 
-      const insertMany = db.transaction((emailList: typeof emails) => {
-        for (const email of emailList) {
-          insertEmail.run(
+      const { sql: convertedSql } = convertToNumberedParams(insertSql);
+
+      await db.transaction(async (client) => {
+        for (const email of emails) {
+          await client.query(convertedSql, [
             email.id, email.accountId, email.threadId, email.messageId,
             email.subject,
             JSON.stringify(email.from),
@@ -296,28 +313,53 @@ router.post(
             email.references ? JSON.stringify(email.references) : null,
             email.snippet || null,
             email.createdAt,
-            email.updatedAt
-          );
+            email.updatedAt,
+          ]);
         }
       });
 
-      insertMany(emails);
       synced = emails.length;
     } else if (account.type === 'imap') {
       const { fetchImapMessages } = await import('../services/imap');
       const emails = await fetchImapMessages(account, { limit: 100 });
 
-      const insertEmail = db.prepare(
-        `INSERT OR REPLACE INTO emails
+      const insertSql = `INSERT INTO emails
           (id, account_id, thread_id, message_id, subject, from_address, to_addresses, cc_addresses, bcc_addresses,
            reply_to, body, body_text, attachments, is_read, is_starred, is_important, is_archived, is_deleted, is_draft,
            priority, date, in_reply_to, email_references, snippet, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      );
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET
+           account_id = EXCLUDED.account_id,
+           thread_id = EXCLUDED.thread_id,
+           message_id = EXCLUDED.message_id,
+           subject = EXCLUDED.subject,
+           from_address = EXCLUDED.from_address,
+           to_addresses = EXCLUDED.to_addresses,
+           cc_addresses = EXCLUDED.cc_addresses,
+           bcc_addresses = EXCLUDED.bcc_addresses,
+           reply_to = EXCLUDED.reply_to,
+           body = EXCLUDED.body,
+           body_text = EXCLUDED.body_text,
+           attachments = EXCLUDED.attachments,
+           is_read = EXCLUDED.is_read,
+           is_starred = EXCLUDED.is_starred,
+           is_important = EXCLUDED.is_important,
+           is_archived = EXCLUDED.is_archived,
+           is_deleted = EXCLUDED.is_deleted,
+           is_draft = EXCLUDED.is_draft,
+           priority = EXCLUDED.priority,
+           date = EXCLUDED.date,
+           in_reply_to = EXCLUDED.in_reply_to,
+           email_references = EXCLUDED.email_references,
+           snippet = EXCLUDED.snippet,
+           created_at = EXCLUDED.created_at,
+           updated_at = EXCLUDED.updated_at`;
 
-      const insertMany = db.transaction((emailList: typeof emails) => {
-        for (const email of emailList) {
-          insertEmail.run(
+      const { sql: convertedSql } = convertToNumberedParams(insertSql);
+
+      await db.transaction(async (client) => {
+        for (const email of emails) {
+          await client.query(convertedSql, [
             email.id, email.accountId, email.threadId, email.messageId,
             email.subject,
             JSON.stringify(email.from),
@@ -339,12 +381,11 @@ router.post(
             email.references ? JSON.stringify(email.references) : null,
             email.snippet || null,
             email.createdAt,
-            email.updatedAt
-          );
+            email.updatedAt,
+          ]);
         }
       });
 
-      insertMany(emails);
       synced = emails.length;
     }
 

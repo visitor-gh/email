@@ -1,136 +1,77 @@
-import path from 'path';
-import fs from 'fs';
+import { Pool, PoolClient } from 'pg';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const DB_PATH = path.resolve(process.env.DB_PATH || './data/email.db');
-const dbDir = path.dirname(DB_PATH);
+let pool: Pool | null = null;
 
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
+function getPool(): Pool {
+  if (!pool) {
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+    });
+  }
+  return pool;
 }
 
-type SqlJsRow = Record<string, string | number | null>;
+function convertToNumberedParams(sql: string, startIndex = 1): { sql: string; nextIndex: number } {
+  let index = startIndex;
+  const converted = sql.replace(/\?/g, () => `$${index++}`);
+  return { sql: converted, nextIndex: index };
+}
 
-type PrepareResult = {
-  get(...args: unknown[]): unknown;
-  all(...args: unknown[]): unknown[];
-  run(...args: unknown[]): { changes: number };
-};
+export { convertToNumberedParams };
 
-class DbWrapper {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private db: any;
-  private dbPath: string;
-  private inTransaction = false;
+export function getDb() {
+  return {
+    async get<T>(sql: string, params?: unknown[]): Promise<T | undefined> {
+      const { sql: converted } = convertToNumberedParams(sql);
+      const result = await getPool().query(converted, params);
+      return result.rows[0] as T | undefined;
+    },
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(db: any, dbPath: string) {
-    this.db = db;
-    this.dbPath = dbPath;
-  }
+    async all<T>(sql: string, params?: unknown[]): Promise<T[]> {
+      const { sql: converted } = convertToNumberedParams(sql);
+      const result = await getPool().query(converted, params);
+      return result.rows as T[];
+    },
 
-  private save(): void {
-    const data: Uint8Array = this.db.export();
-    fs.writeFileSync(this.dbPath, Buffer.from(data));
-  }
+    async run(sql: string, params?: unknown[]): Promise<{ changes: number }> {
+      const { sql: converted } = convertToNumberedParams(sql);
+      const result = await getPool().query(converted, params);
+      return { changes: result.rowCount ?? 0 };
+    },
 
-  private static normalizeRow(row: SqlJsRow): SqlJsRow {
-    for (const key of Object.keys(row)) {
-      if (typeof row[key] === 'bigint') row[key] = Number(row[key] as unknown as bigint);
-    }
-    return row;
-  }
+    async exec(sql: string): Promise<void> {
+      await getPool().query(sql);
+    },
 
-  exec(sql: string): void {
-    this.db.exec(sql);
-    if (!this.inTransaction) this.save();
-  }
-
-  prepare(sql: string): PrepareResult {
-    const self = this;
-    return {
-      get(...args: unknown[]) {
-        const stmt = self.db.prepare(sql);
-        if (args.length > 0) stmt.bind(args);
-        let result: unknown;
-        if (stmt.step()) result = DbWrapper.normalizeRow(stmt.getAsObject());
-        stmt.free();
-        return result;
-      },
-      all(...args: unknown[]) {
-        const stmt = self.db.prepare(sql);
-        if (args.length > 0) stmt.bind(args);
-        const rows: unknown[] = [];
-        while (stmt.step()) rows.push(DbWrapper.normalizeRow(stmt.getAsObject()));
-        stmt.free();
-        return rows;
-      },
-      run(...args: unknown[]) {
-        self.db.run(sql, args.length > 0 ? args : undefined);
-        const changes: number = self.db.getRowsModified();
-        if (!self.inTransaction) self.save();
-        return { changes };
-      },
-    };
-  }
-
-  transaction<T>(fn: (arg: T) => void): (arg: T) => void {
-    return (arg: T) => {
-      this.inTransaction = true;
-      this.db.run('BEGIN TRANSACTION');
+    async transaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+      const client = await getPool().connect();
       try {
-        fn(arg);
-        this.db.run('COMMIT');
+        await client.query('BEGIN');
+        const result = await fn(client);
+        await client.query('COMMIT');
+        return result;
       } catch (e) {
-        try { this.db.run('ROLLBACK'); } catch { /* ignore */ }
+        try { await client.query('ROLLBACK'); } catch { /* ignore */ }
         throw e;
       } finally {
-        this.inTransaction = false;
-        this.save();
+        client.release();
       }
-    };
-  }
-
-  close(): void {
-    this.db.close();
-  }
+    },
+  };
 }
-
-let dbInstance: DbWrapper | null = null;
 
 export async function initializeDb(): Promise<void> {
-  if (dbInstance) return;
-
-  // require.resolve('sql.js') → .../node_modules/sql.js/dist/sql-wasm.js
-  const sqlJsMain = require.resolve('sql.js');
-  const sqlJsDistDir = path.dirname(sqlJsMain);
-  const wasmBinary = fs.readFileSync(path.join(sqlJsDistDir, 'sql-wasm.wasm'));
-
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const initSqlJs = require('sql.js');
-  const SQL = await initSqlJs({ wasmBinary });
-
-  let database: unknown;
-  if (fs.existsSync(DB_PATH)) {
-    database = new SQL.Database(fs.readFileSync(DB_PATH));
-  } else {
-    database = new SQL.Database();
-  }
-
-  dbInstance = new DbWrapper(database, DB_PATH);
+  // Initialize pool (it will connect lazily)
+  getPool();
 }
 
-export function getDb(): DbWrapper {
-  if (!dbInstance) throw new Error('DB가 초기화되지 않았습니다. initializeDb()를 먼저 호출하세요.');
-  return dbInstance;
-}
-
-export function closeDb(): void {
-  if (dbInstance) {
-    dbInstance.close();
-    dbInstance = null;
+export async function closeDb(): Promise<void> {
+  if (pool) {
+    await pool.end();
+    pool = null;
   }
 }
 

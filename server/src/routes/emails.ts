@@ -1,23 +1,24 @@
 import { Router, Request, Response } from 'express';
 import { body, param, query } from 'express-validator';
 import { v4 as uuidv4 } from 'uuid';
-import { getDb } from '../db/database';
+import { getDb, convertToNumberedParams } from '../db/database';
 import { validate } from '../middleware/validate';
 import { asyncHandler, AppError } from '../middleware/errorHandler';
 import { Email, EmailRow, AccountRow, Thread, ApiResponse, SendEmailOptions } from '../types';
 
 const router = Router();
 
-function rowToEmail(row: EmailRow): Email {
-  const accountRow = getDb()
-    .prepare('SELECT * FROM accounts WHERE id = ?')
-    .get(row.account_id) as AccountRow | undefined;
+async function rowToEmail(row: EmailRow): Promise<Email> {
+  const accountRow = await getDb().get<AccountRow>(
+    'SELECT * FROM accounts WHERE id = ?',
+    [row.account_id]
+  );
 
-  const labelIds = (
-    getDb()
-      .prepare('SELECT label_id FROM email_labels WHERE email_id = ?')
-      .all(row.id) as { label_id: string }[]
-  ).map(l => l.label_id);
+  const labelRows = await getDb().all<{ label_id: string }>(
+    'SELECT label_id FROM email_labels WHERE email_id = ?',
+    [row.id]
+  );
+  const labelIds = labelRows.map(l => l.label_id);
 
   return {
     id: row.id,
@@ -125,7 +126,7 @@ router.get(
         // Filter where from matches account email
         whereConditions.push(`(
           SELECT a.email FROM accounts a WHERE a.id = e.account_id
-        ) = JSON_EXTRACT(e.from_address, '$.email')`);
+        ) = (e.from_address::json->>'email')`);
         break;
       case 'starred':
         whereConditions.push('e.is_starred = 1');
@@ -165,16 +166,16 @@ router.get(
     const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
 
     const countQuery = `SELECT COUNT(DISTINCT e.id) as total FROM emails e ${joinClause} ${whereClause}`;
-    const countResult = db.prepare(countQuery).get(...params as []) as { total: number };
-    const total = countResult.total;
+    const countResult = await db.get<{ total: number }>(countQuery, params);
+    const total = countResult?.total ?? 0;
 
     const emailQuery = `
       SELECT DISTINCT e.* FROM emails e ${joinClause} ${whereClause}
       ORDER BY e.date DESC
       LIMIT ? OFFSET ?
     `;
-    const rows = db.prepare(emailQuery).all(...params as [], parseInt(limit), offset) as EmailRow[];
-    const emails = rows.map(rowToEmail);
+    const rows = await db.all<EmailRow>(emailQuery, [...params, parseInt(limit), offset]);
+    const emails = await Promise.all(rows.map(rowToEmail));
 
     let responseData: unknown;
     if (threaded === 'true') {
@@ -205,13 +206,11 @@ router.get(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
     const db = getDb();
-    const row = db
-      .prepare('SELECT * FROM emails WHERE id = ?')
-      .get(req.params.id) as EmailRow | undefined;
+    const row = await db.get<EmailRow>('SELECT * FROM emails WHERE id = ?', [req.params.id]);
 
     if (!row) throw new AppError('이메일을 찾을 수 없습니다', 404);
 
-    res.json({ success: true, data: rowToEmail(row) } as ApiResponse<Email>);
+    res.json({ success: true, data: await rowToEmail(row) } as ApiResponse<Email>);
   })
 );
 
@@ -220,13 +219,14 @@ router.get(
   '/thread/:threadId',
   asyncHandler(async (req: Request, res: Response) => {
     const db = getDb();
-    const rows = db
-      .prepare('SELECT * FROM emails WHERE thread_id = ? AND is_deleted = 0 ORDER BY date ASC')
-      .all(req.params.threadId) as EmailRow[];
+    const rows = await db.all<EmailRow>(
+      'SELECT * FROM emails WHERE thread_id = ? AND is_deleted = 0 ORDER BY date ASC',
+      [req.params.threadId]
+    );
 
     if (rows.length === 0) throw new AppError('스레드를 찾을 수 없습니다', 404);
 
-    const emails = rows.map(rowToEmail);
+    const emails = await Promise.all(rows.map(rowToEmail));
     const threads = buildThreads(emails);
     const thread = threads[0];
 
@@ -248,9 +248,10 @@ router.post(
     const db = getDb();
     const { accountId, to, cc, bcc, subject, body: emailBody, inReplyTo, references, threadId } = req.body;
 
-    const accountRow = db
-      .prepare('SELECT * FROM accounts WHERE id = ? AND is_active = 1')
-      .get(accountId) as AccountRow | undefined;
+    const accountRow = await db.get<AccountRow>(
+      'SELECT * FROM accounts WHERE id = ? AND is_active = 1',
+      [accountId]
+    );
 
     if (!accountRow) throw new AppError('유효한 계정을 찾을 수 없습니다', 404);
 
@@ -308,24 +309,25 @@ router.post(
     const emailId = uuidv4();
     const finalThreadId = sentThreadId || threadId || emailId;
 
-    db.prepare(
+    await db.run(
       `INSERT INTO emails (id, account_id, thread_id, message_id, subject, from_address, to_addresses, cc_addresses, bcc_addresses,
        body, body_text, attachments, is_read, is_starred, is_important, is_archived, is_deleted, is_draft, priority, date, in_reply_to, email_references, snippet, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', 1, 0, 0, 0, 0, 0, 'normal', ?, ?, ?, ?, ?, ?)`
-    ).run(
-      emailId, accountId, finalThreadId, sentMessageId || emailId,
-      subject,
-      JSON.stringify({ name: account.name, email: account.email }),
-      JSON.stringify(to),
-      JSON.stringify(cc || []),
-      JSON.stringify(bcc || []),
-      emailBody,
-      emailBody.replace(/<[^>]*>/g, '').slice(0, 500),
-      now,
-      inReplyTo || null,
-      references ? JSON.stringify(references) : null,
-      emailBody.replace(/<[^>]*>/g, '').slice(0, 200),
-      now, now
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', 1, 0, 0, 0, 0, 0, 'normal', ?, ?, ?, ?, ?, ?)`,
+      [
+        emailId, accountId, finalThreadId, sentMessageId || emailId,
+        subject,
+        JSON.stringify({ name: account.name, email: account.email }),
+        JSON.stringify(to),
+        JSON.stringify(cc || []),
+        JSON.stringify(bcc || []),
+        emailBody,
+        emailBody.replace(/<[^>]*>/g, '').slice(0, 500),
+        now,
+        inReplyTo || null,
+        references ? JSON.stringify(references) : null,
+        emailBody.replace(/<[^>]*>/g, '').slice(0, 200),
+        now, now
+      ]
     );
 
     res.json({ success: true, data: { id: emailId, threadId: finalThreadId }, message: '이메일을 전송했습니다' });
@@ -340,9 +342,10 @@ router.patch(
     const { isRead = true } = req.body;
     const now = new Date().toISOString();
 
-    const result = db
-      .prepare('UPDATE emails SET is_read = ?, updated_at = ? WHERE id = ?')
-      .run(isRead ? 1 : 0, now, req.params.id);
+    const result = await db.run(
+      'UPDATE emails SET is_read = ?, updated_at = ? WHERE id = ?',
+      [isRead ? 1 : 0, now, req.params.id]
+    );
 
     if (result.changes === 0) throw new AppError('이메일을 찾을 수 없습니다', 404);
     res.json({ success: true, message: `이메일을 ${isRead ? '읽음' : '읽지 않음'}으로 표시했습니다` });
@@ -357,9 +360,10 @@ router.patch(
     const { isStarred = true } = req.body;
     const now = new Date().toISOString();
 
-    const result = db
-      .prepare('UPDATE emails SET is_starred = ?, updated_at = ? WHERE id = ?')
-      .run(isStarred ? 1 : 0, now, req.params.id);
+    const result = await db.run(
+      'UPDATE emails SET is_starred = ?, updated_at = ? WHERE id = ?',
+      [isStarred ? 1 : 0, now, req.params.id]
+    );
 
     if (result.changes === 0) throw new AppError('이메일을 찾을 수 없습니다', 404);
     res.json({ success: true, message: `이메일을 ${isStarred ? '중요' : '중요 해제'}로 표시했습니다` });
@@ -374,8 +378,10 @@ router.patch(
     const { isImportant = true } = req.body;
     const now = new Date().toISOString();
 
-    db.prepare('UPDATE emails SET is_important = ?, updated_at = ? WHERE id = ?')
-      .run(isImportant ? 1 : 0, now, req.params.id);
+    await db.run(
+      'UPDATE emails SET is_important = ?, updated_at = ? WHERE id = ?',
+      [isImportant ? 1 : 0, now, req.params.id]
+    );
 
     res.json({ success: true, message: '이메일 중요도가 변경되었습니다' });
   })
@@ -389,8 +395,10 @@ router.patch(
     const { isArchived = true } = req.body;
     const now = new Date().toISOString();
 
-    db.prepare('UPDATE emails SET is_archived = ?, updated_at = ? WHERE id = ?')
-      .run(isArchived ? 1 : 0, now, req.params.id);
+    await db.run(
+      'UPDATE emails SET is_archived = ?, updated_at = ? WHERE id = ?',
+      [isArchived ? 1 : 0, now, req.params.id]
+    );
 
     res.json({ success: true, message: `이메일을 ${isArchived ? '보관' : '보관 해제'}했습니다` });
   })
@@ -405,9 +413,9 @@ router.delete(
     const now = new Date().toISOString();
 
     if (permanent === 'true') {
-      db.prepare('DELETE FROM emails WHERE id = ?').run(req.params.id);
+      await db.run('DELETE FROM emails WHERE id = ?', [req.params.id]);
     } else {
-      db.prepare('UPDATE emails SET is_deleted = 1, updated_at = ? WHERE id = ?').run(now, req.params.id);
+      await db.run('UPDATE emails SET is_deleted = 1, updated_at = ? WHERE id = ?', [now, req.params.id]);
     }
 
     res.json({ success: true, message: '이메일을 삭제했습니다' });
@@ -423,13 +431,16 @@ router.post(
     const db = getDb();
     const { labelId } = req.body;
 
-    const email = db.prepare('SELECT id FROM emails WHERE id = ?').get(req.params.id);
+    const email = await db.get('SELECT id FROM emails WHERE id = ?', [req.params.id]);
     if (!email) throw new AppError('이메일을 찾을 수 없습니다', 404);
 
-    const label = db.prepare('SELECT id FROM labels WHERE id = ?').get(labelId);
+    const label = await db.get('SELECT id FROM labels WHERE id = ?', [labelId]);
     if (!label) throw new AppError('라벨을 찾을 수 없습니다', 404);
 
-    db.prepare('INSERT OR IGNORE INTO email_labels (email_id, label_id) VALUES (?, ?)').run(req.params.id, labelId);
+    await db.run(
+      'INSERT INTO email_labels (email_id, label_id) VALUES (?, ?) ON CONFLICT DO NOTHING',
+      [req.params.id, labelId]
+    );
     res.json({ success: true, message: '라벨을 추가했습니다' });
   })
 );
@@ -439,7 +450,10 @@ router.delete(
   '/:id/labels/:labelId',
   asyncHandler(async (req: Request, res: Response) => {
     const db = getDb();
-    db.prepare('DELETE FROM email_labels WHERE email_id = ? AND label_id = ?').run(req.params.id, req.params.labelId);
+    await db.run(
+      'DELETE FROM email_labels WHERE email_id = ? AND label_id = ?',
+      [req.params.id, req.params.labelId]
+    );
     res.json({ success: true, message: '라벨을 제거했습니다' });
   })
 );
@@ -452,8 +466,10 @@ router.patch(
     const { isRead = true } = req.body;
     const now = new Date().toISOString();
 
-    db.prepare('UPDATE emails SET is_read = ?, updated_at = ? WHERE thread_id = ?')
-      .run(isRead ? 1 : 0, now, req.params.threadId);
+    await db.run(
+      'UPDATE emails SET is_read = ?, updated_at = ? WHERE thread_id = ?',
+      [isRead ? 1 : 0, now, req.params.threadId]
+    );
 
     res.json({ success: true, message: '스레드를 읽음으로 표시했습니다' });
   })
@@ -482,24 +498,26 @@ router.get(
       searchParams.push(accountId);
     }
 
-    const countResult = db
-      .prepare(`SELECT COUNT(DISTINCT e.id) as total FROM emails e WHERE ${baseWhere}`)
-      .get(...searchParams as []) as { total: number };
+    const countResult = await db.get<{ total: number }>(
+      `SELECT COUNT(DISTINCT e.id) as total FROM emails e WHERE ${baseWhere}`,
+      searchParams
+    );
 
-    const rows = db
-      .prepare(`SELECT DISTINCT e.* FROM emails e WHERE ${baseWhere} ORDER BY e.date DESC LIMIT ? OFFSET ?`)
-      .all(...searchParams as [], parseInt(limit), offset) as EmailRow[];
+    const rows = await db.all<EmailRow>(
+      `SELECT DISTINCT e.* FROM emails e WHERE ${baseWhere} ORDER BY e.date DESC LIMIT ? OFFSET ?`,
+      [...searchParams, parseInt(limit), offset]
+    );
 
-    const emails = rows.map(rowToEmail);
+    const emails = await Promise.all(rows.map(rowToEmail));
 
     res.json({
       success: true,
       data: {
         data: emails,
-        total: countResult.total,
+        total: countResult?.total ?? 0,
         page: parseInt(page),
         limit: parseInt(limit),
-        totalPages: Math.ceil(countResult.total / parseInt(limit)),
+        totalPages: Math.ceil((countResult?.total ?? 0) / parseInt(limit)),
       },
     });
   })
@@ -522,28 +540,28 @@ router.post(
 
     switch (action) {
       case 'read':
-        db.prepare(`UPDATE emails SET is_read = 1, updated_at = ? WHERE id IN (${placeholders})`).run(now, ...ids);
+        await db.run(`UPDATE emails SET is_read = 1, updated_at = ? WHERE id IN (${placeholders})`, [now, ...ids]);
         break;
       case 'unread':
-        db.prepare(`UPDATE emails SET is_read = 0, updated_at = ? WHERE id IN (${placeholders})`).run(now, ...ids);
+        await db.run(`UPDATE emails SET is_read = 0, updated_at = ? WHERE id IN (${placeholders})`, [now, ...ids]);
         break;
       case 'star':
-        db.prepare(`UPDATE emails SET is_starred = 1, updated_at = ? WHERE id IN (${placeholders})`).run(now, ...ids);
+        await db.run(`UPDATE emails SET is_starred = 1, updated_at = ? WHERE id IN (${placeholders})`, [now, ...ids]);
         break;
       case 'unstar':
-        db.prepare(`UPDATE emails SET is_starred = 0, updated_at = ? WHERE id IN (${placeholders})`).run(now, ...ids);
+        await db.run(`UPDATE emails SET is_starred = 0, updated_at = ? WHERE id IN (${placeholders})`, [now, ...ids]);
         break;
       case 'archive':
-        db.prepare(`UPDATE emails SET is_archived = 1, updated_at = ? WHERE id IN (${placeholders})`).run(now, ...ids);
+        await db.run(`UPDATE emails SET is_archived = 1, updated_at = ? WHERE id IN (${placeholders})`, [now, ...ids]);
         break;
       case 'unarchive':
-        db.prepare(`UPDATE emails SET is_archived = 0, updated_at = ? WHERE id IN (${placeholders})`).run(now, ...ids);
+        await db.run(`UPDATE emails SET is_archived = 0, updated_at = ? WHERE id IN (${placeholders})`, [now, ...ids]);
         break;
       case 'delete':
-        db.prepare(`UPDATE emails SET is_deleted = 1, updated_at = ? WHERE id IN (${placeholders})`).run(now, ...ids);
+        await db.run(`UPDATE emails SET is_deleted = 1, updated_at = ? WHERE id IN (${placeholders})`, [now, ...ids]);
         break;
       case 'restore':
-        db.prepare(`UPDATE emails SET is_deleted = 0, updated_at = ? WHERE id IN (${placeholders})`).run(now, ...ids);
+        await db.run(`UPDATE emails SET is_deleted = 0, updated_at = ? WHERE id IN (${placeholders})`, [now, ...ids]);
         break;
     }
 

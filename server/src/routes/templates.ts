@@ -34,20 +34,18 @@ router.get(
       query += ' WHERE category = ?';
       params.push(category);
     }
-
     query += ' ORDER BY category ASC, name ASC';
 
-    const rows = db.prepare(query).all(...params as []) as TemplateRow[];
+    const rows = await db.all<TemplateRow>(query, params);
     const templates = rows.map(rowToTemplate);
 
-    // Group by category
     const grouped: Record<string, Template[]> = {};
     for (const tmpl of templates) {
       if (!grouped[tmpl.category]) grouped[tmpl.category] = [];
       grouped[tmpl.category].push(tmpl);
     }
 
-    res.json({ success: true, data: { templates, grouped } } as ApiResponse<{ templates: Template[]; grouped: Record<string, Template[]> }>);
+    res.json({ success: true, data: { templates, grouped } });
   })
 );
 
@@ -56,10 +54,7 @@ router.get(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
     const db = getDb();
-    const row = db
-      .prepare('SELECT * FROM templates WHERE id = ?')
-      .get(req.params.id) as TemplateRow | undefined;
-
+    const row = await db.get<TemplateRow>('SELECT * FROM templates WHERE id = ?', [req.params.id]);
     if (!row) throw new AppError('템플릿을 찾을 수 없습니다', 404);
     res.json({ success: true, data: rowToTemplate(row) } as ApiResponse<Template>);
   })
@@ -77,17 +72,17 @@ router.post(
   asyncHandler(async (req: Request, res: Response) => {
     const db = getDb();
     const { name, subject, body: tmplBody, category = '일반' } = req.body;
-
     const now = new Date().toISOString();
     const id = uuidv4();
 
-    db.prepare(
+    await db.run(
       `INSERT INTO templates (id, name, subject, body, category, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(id, name, subject, tmplBody, category, now, now);
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [id, name, subject, tmplBody, category, now, now]
+    );
 
-    const row = db.prepare('SELECT * FROM templates WHERE id = ?').get(id) as TemplateRow;
-    res.status(201).json({ success: true, data: rowToTemplate(row) } as ApiResponse<Template>);
+    const row = await db.get<TemplateRow>('SELECT * FROM templates WHERE id = ?', [id]);
+    res.status(201).json({ success: true, data: rowToTemplate(row!) } as ApiResponse<Template>);
   })
 );
 
@@ -96,27 +91,25 @@ router.put(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
     const db = getDb();
-    const existing = db
-      .prepare('SELECT * FROM templates WHERE id = ?')
-      .get(req.params.id) as TemplateRow | undefined;
-
+    const existing = await db.get<TemplateRow>('SELECT * FROM templates WHERE id = ?', [req.params.id]);
     if (!existing) throw new AppError('템플릿을 찾을 수 없습니다', 404);
 
     const { name, subject, body: tmplBody, category } = req.body;
     const now = new Date().toISOString();
 
-    db.prepare(
+    await db.run(
       `UPDATE templates SET
         name = COALESCE(?, name),
         subject = COALESCE(?, subject),
         body = COALESCE(?, body),
         category = COALESCE(?, category),
         updated_at = ?
-       WHERE id = ?`
-    ).run(name || null, subject || null, tmplBody || null, category || null, now, req.params.id);
+       WHERE id = ?`,
+      [name || null, subject || null, tmplBody || null, category || null, now, req.params.id]
+    );
 
-    const row = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id) as TemplateRow;
-    res.json({ success: true, data: rowToTemplate(row) } as ApiResponse<Template>);
+    const row = await db.get<TemplateRow>('SELECT * FROM templates WHERE id = ?', [req.params.id]);
+    res.json({ success: true, data: rowToTemplate(row!) } as ApiResponse<Template>);
   })
 );
 
@@ -125,13 +118,10 @@ router.delete(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
     const db = getDb();
-    const existing = db
-      .prepare('SELECT * FROM templates WHERE id = ?')
-      .get(req.params.id) as TemplateRow | undefined;
-
+    const existing = await db.get<TemplateRow>('SELECT * FROM templates WHERE id = ?', [req.params.id]);
     if (!existing) throw new AppError('템플릿을 찾을 수 없습니다', 404);
 
-    db.prepare('DELETE FROM templates WHERE id = ?').run(req.params.id);
+    await db.run('DELETE FROM templates WHERE id = ?', [req.params.id]);
     res.json({ success: true, message: '템플릿을 삭제했습니다' });
   })
 );

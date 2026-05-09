@@ -1,0 +1,9 @@
+[build]
+buildCommand = "npm install && npm run build"
+
+[deploy]
+startCommand = "NODE_ENV=production node server/dist/index.js"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3

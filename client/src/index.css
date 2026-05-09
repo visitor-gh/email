@@ -1,0 +1,105 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply box-border;
+  }
+
+  html {
+    font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, 'Segoe UI', sans-serif;
+  }
+
+  body {
+    @apply bg-gray-50 text-gray-900 antialiased;
+  }
+
+  ::-webkit-scrollbar {
+    @apply w-1.5 h-1.5;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-gray-300 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-400;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-offset-1 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-primary {
+    @apply btn bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-500;
+  }
+
+  .btn-secondary {
+    @apply btn bg-gray-100 text-gray-700 hover:bg-gray-200 focus:ring-gray-400;
+  }
+
+  .btn-danger {
+    @apply btn bg-red-600 text-white hover:bg-red-700 focus:ring-red-500;
+  }
+
+  .btn-ghost {
+    @apply btn text-gray-600 hover:bg-gray-100 focus:ring-gray-400;
+  }
+
+  .input {
+    @apply block w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent placeholder-gray-400 bg-white;
+  }
+
+  .input-error {
+    @apply border-red-500 focus:ring-red-500;
+  }
+
+  .label {
+    @apply block text-sm font-medium text-gray-700 mb-1;
+  }
+
+  .email-row {
+    @apply flex items-center px-4 py-3 cursor-pointer border-b border-gray-100 hover:bg-gray-50 transition-colors;
+  }
+
+  .email-row.unread {
+    @apply bg-white font-medium;
+  }
+
+  .email-row.selected {
+    @apply bg-blue-50;
+  }
+}
+
+/* React Quill editor styles */
+.ql-editor {
+  min-height: 200px;
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.ql-toolbar {
+  border-top-left-radius: 6px;
+  border-top-right-radius: 6px;
+  background: #f9fafb;
+  border-color: #e5e7eb !important;
+}
+
+.ql-container {
+  border-bottom-left-radius: 6px;
+  border-bottom-right-radius: 6px;
+  border-color: #e5e7eb !important;
+}
+
+.ql-container.ql-snow:focus-within {
+  border-color: #3b82f6 !important;
+  outline: 2px solid #bfdbfe;
+  outline-offset: 0;
+}

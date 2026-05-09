@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "description": "Corporate Email Integration Management System",
   "private": true,
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
   "workspaces": [
     "server",
     "client"

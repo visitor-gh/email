@@ -1,54 +1,94 @@
 import { Router, Request, Response } from 'express';
-import { body, param, query } from 'express-validator';
+import { body } from 'express-validator';
 import { v4 as uuidv4 } from 'uuid';
-import { getDb, convertToNumberedParams } from '../db/database';
+import { getCollection } from '../db/database';
 import { validate } from '../middleware/validate';
 import { asyncHandler, AppError } from '../middleware/errorHandler';
-import { Email, EmailRow, AccountRow, Thread, ApiResponse, SendEmailOptions } from '../types';
+import { Email, Thread, ApiResponse, SendEmailOptions } from '../types';
 
 const router = Router();
 
-async function rowToEmail(row: EmailRow): Promise<Email> {
-  const accountRow = await getDb().get<AccountRow>(
-    'SELECT * FROM accounts WHERE id = ?',
-    [row.account_id]
-  );
+interface EmailDoc {
+  _id: string;
+  accountId: string;
+  threadId: string;
+  messageId: string;
+  subject: string;
+  from: { name?: string; email: string };
+  to: { name?: string; email: string }[];
+  cc: { name?: string; email: string }[];
+  bcc: { name?: string; email: string }[];
+  replyTo?: { name?: string; email: string } | null;
+  body: string;
+  bodyText: string;
+  attachments: unknown[];
+  labels: string[];
+  isRead: boolean;
+  isStarred: boolean;
+  isImportant: boolean;
+  isArchived: boolean;
+  isDeleted: boolean;
+  isDraft: boolean;
+  priority: string;
+  date: string;
+  inReplyTo?: string | null;
+  references?: string[] | null;
+  snippet?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
 
-  const labelRows = await getDb().all<{ label_id: string }>(
-    'SELECT label_id FROM email_labels WHERE email_id = ?',
-    [row.id]
-  );
-  const labelIds = labelRows.map(l => l.label_id);
+interface AccountDoc {
+  _id: string;
+  email: string;
+  name: string;
+  type: string;
+  accessToken?: string | null;
+  refreshToken?: string | null;
+  tokenExpiry?: number | null;
+  imapHost?: string | null;
+  imapPort?: number | null;
+  imapSecure?: boolean;
+  smtpHost?: string | null;
+  smtpPort?: number | null;
+  smtpSecure?: boolean;
+  password?: string | null;
+  signature?: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
 
+function docToEmail(doc: EmailDoc, accountEmail?: string): Email {
   return {
-    id: row.id,
-    accountId: row.account_id,
-    accountEmail: accountRow?.email,
-    threadId: row.thread_id,
-    messageId: row.message_id,
-    subject: row.subject,
-    from: JSON.parse(row.from_address),
-    to: JSON.parse(row.to_addresses),
-    cc: JSON.parse(row.cc_addresses),
-    bcc: JSON.parse(row.bcc_addresses),
-    replyTo: row.reply_to ? JSON.parse(row.reply_to) : undefined,
-    body: row.body,
-    bodyText: row.body_text,
-    attachments: JSON.parse(row.attachments),
-    labels: labelIds,
-    isRead: row.is_read === 1,
-    isStarred: row.is_starred === 1,
-    isImportant: row.is_important === 1,
-    isArchived: row.is_archived === 1,
-    isDeleted: row.is_deleted === 1,
-    isDraft: row.is_draft === 1,
-    priority: row.priority,
-    date: row.date,
-    inReplyTo: row.in_reply_to || undefined,
-    references: row.email_references ? JSON.parse(row.email_references) : undefined,
-    snippet: row.snippet || undefined,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    id: doc._id,
+    accountId: doc.accountId,
+    accountEmail,
+    threadId: doc.threadId,
+    messageId: doc.messageId,
+    subject: doc.subject,
+    from: doc.from,
+    to: doc.to,
+    cc: doc.cc,
+    bcc: doc.bcc,
+    replyTo: doc.replyTo || undefined,
+    body: doc.body,
+    bodyText: doc.bodyText,
+    attachments: doc.attachments as Email['attachments'],
+    labels: doc.labels,
+    isRead: doc.isRead,
+    isStarred: doc.isStarred,
+    isImportant: doc.isImportant,
+    isArchived: doc.isArchived,
+    isDeleted: doc.isDeleted,
+    isDraft: doc.isDraft,
+    priority: doc.priority as Email['priority'],
+    date: doc.date,
+    inReplyTo: doc.inReplyTo || undefined,
+    references: doc.references || undefined,
+    snippet: doc.snippet || undefined,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
   };
 }
 
@@ -85,7 +125,6 @@ function buildThreads(emails: Email[]): Thread[] {
     });
   }
 
-  // Sort threads by latest email date
   threads.sort((a, b) => new Date(b.lastEmail.date).getTime() - new Date(a.lastEmail.date).getTime());
   return threads;
 }
@@ -94,7 +133,8 @@ function buildThreads(emails: Email[]): Thread[] {
 router.get(
   '/',
   asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
+    const col = getCollection<EmailDoc>('emails');
+    const accountsCol = getCollection<AccountDoc>('accounts');
     const {
       accountId,
       labelId,
@@ -105,77 +145,98 @@ router.get(
       threaded = 'true',
     } = req.query as Record<string, string>;
 
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const offset = (pageNum - 1) * limitNum;
 
-    let whereConditions: string[] = ['e.is_deleted = 0'];
-    const params: unknown[] = [];
+    // Build filter
+    const filter: Record<string, unknown> = {};
 
     if (accountId) {
-      whereConditions.push('e.account_id = ?');
-      params.push(accountId);
+      filter.accountId = accountId;
     }
 
-    // Folder filter
+    // Folder filtering
     switch (folder) {
       case 'inbox':
-        whereConditions.push('e.is_archived = 0', 'e.is_draft = 0', 'e.is_deleted = 0');
-        // Exclude emails where account is the sender (for inbox)
+        filter.isDeleted = false;
+        filter.isArchived = false;
+        filter.isDraft = false;
         break;
       case 'sent':
-        whereConditions.push('e.is_draft = 0');
-        // Filter where from matches account email
-        whereConditions.push(`(
-          SELECT a.email FROM accounts a WHERE a.id = e.account_id
-        ) = (e.from_address::json->>'email')`);
-        break;
-      case 'starred':
-        whereConditions.push('e.is_starred = 1');
-        break;
-      case 'important':
-        whereConditions.push('e.is_important = 1');
-        break;
-      case 'archive':
-        whereConditions.push('e.is_archived = 1', 'e.is_draft = 0');
-        break;
-      case 'trash':
-        whereConditions = ['e.is_deleted = 1']; // Reset conditions for trash
+        filter.isDraft = false;
+        filter.isDeleted = false;
+        // Filter by account email as sender - handled after getting account
         if (accountId) {
-          whereConditions.push('e.account_id = ?');
+          const accountDoc = await accountsCol.findOne({ _id: accountId });
+          if (accountDoc) {
+            filter['from.email'] = accountDoc.email;
+          }
         }
         break;
+      case 'starred':
+        filter.isStarred = true;
+        filter.isDeleted = false;
+        break;
+      case 'important':
+        filter.isImportant = true;
+        filter.isDeleted = false;
+        break;
+      case 'archive':
+        filter.isArchived = true;
+        filter.isDraft = false;
+        filter.isDeleted = false;
+        break;
+      case 'trash':
+        filter.isDeleted = true;
+        break;
       case 'drafts':
-        whereConditions.push('e.is_draft = 1');
+        filter.isDraft = true;
+        filter.isDeleted = false;
         break;
       case 'unread':
-        whereConditions.push('e.is_read = 0', 'e.is_draft = 0', 'e.is_archived = 0');
+        filter.isRead = false;
+        filter.isDraft = false;
+        filter.isArchived = false;
+        filter.isDeleted = false;
+        break;
+      default:
+        filter.isDeleted = false;
         break;
     }
 
     if (labelId) {
-      whereConditions.push('el.label_id = ?');
-      params.push(labelId);
+      filter.labels = labelId;
     }
 
     if (q) {
-      whereConditions.push(`(e.subject LIKE ? OR e.from_address LIKE ? OR e.body_text LIKE ?)`);
-      const likeQ = `%${q}%`;
-      params.push(likeQ, likeQ, likeQ);
+      const qRegex = new RegExp(q, 'i');
+      filter.$or = [
+        { subject: qRegex },
+        { bodyText: qRegex },
+        { 'from.email': qRegex },
+      ];
     }
 
-    const joinClause = labelId ? 'JOIN email_labels el ON e.id = el.email_id' : '';
-    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+    const total = await col.countDocuments(filter as Parameters<typeof col.countDocuments>[0]);
+    const docs = await col
+      .find(filter as Parameters<typeof col.find>[0])
+      .sort({ date: -1 })
+      .skip(offset)
+      .limit(limitNum)
+      .toArray();
 
-    const countQuery = `SELECT COUNT(DISTINCT e.id) as total FROM emails e ${joinClause} ${whereClause}`;
-    const countResult = await db.get<{ total: number }>(countQuery, params);
-    const total = countResult?.total ?? 0;
-
-    const emailQuery = `
-      SELECT DISTINCT e.* FROM emails e ${joinClause} ${whereClause}
-      ORDER BY e.date DESC
-      LIMIT ? OFFSET ?
-    `;
-    const rows = await db.all<EmailRow>(emailQuery, [...params, parseInt(limit), offset]);
-    const emails = await Promise.all(rows.map(rowToEmail));
+    // Enrich with account email
+    const accountCache = new Map<string, string>();
+    const emails = await Promise.all(docs.map(async doc => {
+      let accountEmail = accountCache.get(doc.accountId);
+      if (!accountEmail) {
+        const acc = await accountsCol.findOne({ _id: doc.accountId });
+        accountEmail = acc?.email;
+        if (accountEmail) accountCache.set(doc.accountId, accountEmail);
+      }
+      return docToEmail(doc, accountEmail);
+    }));
 
     let responseData: unknown;
     if (threaded === 'true') {
@@ -183,17 +244,17 @@ router.get(
       responseData = {
         threads,
         total,
-        page: parseInt(page),
-        limit: parseInt(limit),
-        totalPages: Math.ceil(total / parseInt(limit)),
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(total / limitNum),
       };
     } else {
       responseData = {
         data: emails,
         total,
-        page: parseInt(page),
-        limit: parseInt(limit),
-        totalPages: Math.ceil(total / parseInt(limit)),
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(total / limitNum),
       };
     }
 
@@ -201,36 +262,102 @@ router.get(
   })
 );
 
-// GET /api/emails/:id
+// GET /api/emails/search/results - Search emails
 router.get(
-  '/:id',
+  '/search/results',
   asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
-    const row = await db.get<EmailRow>('SELECT * FROM emails WHERE id = ?', [req.params.id]);
+    const col = getCollection<EmailDoc>('emails');
+    const accountsCol = getCollection<AccountDoc>('accounts');
+    const { q, accountId, page = '1', limit = '50' } = req.query as Record<string, string>;
 
-    if (!row) throw new AppError('이메일을 찾을 수 없습니다', 404);
+    if (!q) {
+      res.json({ success: true, data: { data: [], total: 0, page: 1, limit: 50, totalPages: 0 } });
+      return;
+    }
 
-    res.json({ success: true, data: await rowToEmail(row) } as ApiResponse<Email>);
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const offset = (pageNum - 1) * limitNum;
+    const qRegex = new RegExp(q, 'i');
+
+    const filter: Record<string, unknown> = {
+      isDeleted: false,
+      $or: [
+        { subject: qRegex },
+        { bodyText: qRegex },
+        { 'from.email': qRegex },
+      ],
+    };
+
+    if (accountId) {
+      filter.accountId = accountId;
+    }
+
+    const total = await col.countDocuments(filter as Parameters<typeof col.countDocuments>[0]);
+    const docs = await col
+      .find(filter as Parameters<typeof col.find>[0])
+      .sort({ date: -1 })
+      .skip(offset)
+      .limit(limitNum)
+      .toArray();
+
+    const accountCache = new Map<string, string>();
+    const emails = await Promise.all(docs.map(async doc => {
+      let accountEmail = accountCache.get(doc.accountId);
+      if (!accountEmail) {
+        const acc = await accountsCol.findOne({ _id: doc.accountId });
+        accountEmail = acc?.email;
+        if (accountEmail) accountCache.set(doc.accountId, accountEmail);
+      }
+      return docToEmail(doc, accountEmail);
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        data: emails,
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(total / limitNum),
+      },
+    });
   })
 );
 
-// GET /api/emails/thread/:threadId
-router.get(
-  '/thread/:threadId',
+// POST /api/emails/batch - Batch operations
+router.post(
+  '/batch',
+  [
+    body('ids').isArray({ min: 1 }).withMessage('이메일 ID 목록을 입력해주세요'),
+    body('action').isIn(['read', 'unread', 'star', 'unstar', 'archive', 'unarchive', 'delete', 'restore']).withMessage('올바른 작업을 선택해주세요'),
+  ],
+  validate,
   asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
-    const rows = await db.all<EmailRow>(
-      'SELECT * FROM emails WHERE thread_id = ? AND is_deleted = 0 ORDER BY date ASC',
-      [req.params.threadId]
-    );
+    const col = getCollection<EmailDoc>('emails');
+    const { ids, action } = req.body;
+    const now = new Date().toISOString();
 
-    if (rows.length === 0) throw new AppError('스레드를 찾을 수 없습니다', 404);
+    const updateMap: Record<string, Record<string, unknown>> = {
+      read: { isRead: true },
+      unread: { isRead: false },
+      star: { isStarred: true },
+      unstar: { isStarred: false },
+      archive: { isArchived: true },
+      unarchive: { isArchived: false },
+      delete: { isDeleted: true },
+      restore: { isDeleted: false },
+    };
 
-    const emails = await Promise.all(rows.map(rowToEmail));
-    const threads = buildThreads(emails);
-    const thread = threads[0];
+    const updates = updateMap[action];
+    if (updates) {
+      await col.updateMany(
+        { _id: { $in: ids } } as Parameters<typeof col.updateMany>[0],
+        { $set: { ...updates, updatedAt: now } }
+      );
+    }
 
-    res.json({ success: true, data: thread } as ApiResponse<Thread>);
+    res.json({ success: true, message: `${ids.length}개 이메일에 작업을 수행했습니다` });
   })
 );
 
@@ -245,35 +372,32 @@ router.post(
   ],
   validate,
   asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
+    const accountsCol = getCollection<AccountDoc>('accounts');
+    const emailsCol = getCollection<EmailDoc>('emails');
     const { accountId, to, cc, bcc, subject, body: emailBody, inReplyTo, references, threadId } = req.body;
 
-    const accountRow = await db.get<AccountRow>(
-      'SELECT * FROM accounts WHERE id = ? AND is_active = 1',
-      [accountId]
-    );
-
-    if (!accountRow) throw new AppError('유효한 계정을 찾을 수 없습니다', 404);
+    const accountDoc = await accountsCol.findOne({ _id: accountId, isActive: true });
+    if (!accountDoc) throw new AppError('유효한 계정을 찾을 수 없습니다', 404);
 
     const account = {
-      id: accountRow.id,
-      name: accountRow.name,
-      email: accountRow.email,
-      type: accountRow.type,
-      accessToken: accountRow.access_token || undefined,
-      refreshToken: accountRow.refresh_token || undefined,
-      tokenExpiry: accountRow.token_expiry || undefined,
-      imapHost: accountRow.imap_host || undefined,
-      imapPort: accountRow.imap_port || undefined,
-      imapSecure: accountRow.imap_secure === 1,
-      smtpHost: accountRow.smtp_host || undefined,
-      smtpPort: accountRow.smtp_port || undefined,
-      smtpSecure: accountRow.smtp_secure === 1,
-      password: accountRow.password || undefined,
-      signature: accountRow.signature || undefined,
-      isActive: accountRow.is_active === 1,
-      createdAt: accountRow.created_at,
-      updatedAt: accountRow.updated_at,
+      id: accountDoc._id,
+      name: accountDoc.name,
+      email: accountDoc.email,
+      type: accountDoc.type as 'gmail' | 'imap',
+      accessToken: accountDoc.accessToken || undefined,
+      refreshToken: accountDoc.refreshToken || undefined,
+      tokenExpiry: accountDoc.tokenExpiry || undefined,
+      imapHost: accountDoc.imapHost || undefined,
+      imapPort: accountDoc.imapPort || undefined,
+      imapSecure: accountDoc.imapSecure ?? true,
+      smtpHost: accountDoc.smtpHost || undefined,
+      smtpPort: accountDoc.smtpPort || undefined,
+      smtpSecure: accountDoc.smtpSecure ?? true,
+      password: accountDoc.password || undefined,
+      signature: accountDoc.signature || undefined,
+      isActive: accountDoc.isActive,
+      createdAt: accountDoc.createdAt,
+      updatedAt: accountDoc.updatedAt,
     };
 
     const sendOptions: SendEmailOptions = {
@@ -304,33 +428,89 @@ router.post(
       sentThreadId = result.threadId;
     }
 
-    // Save to DB
     const now = new Date().toISOString();
     const emailId = uuidv4();
     const finalThreadId = sentThreadId || threadId || emailId;
 
-    await db.run(
-      `INSERT INTO emails (id, account_id, thread_id, message_id, subject, from_address, to_addresses, cc_addresses, bcc_addresses,
-       body, body_text, attachments, is_read, is_starred, is_important, is_archived, is_deleted, is_draft, priority, date, in_reply_to, email_references, snippet, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', 1, 0, 0, 0, 0, 0, 'normal', ?, ?, ?, ?, ?, ?)`,
-      [
-        emailId, accountId, finalThreadId, sentMessageId || emailId,
-        subject,
-        JSON.stringify({ name: account.name, email: account.email }),
-        JSON.stringify(to),
-        JSON.stringify(cc || []),
-        JSON.stringify(bcc || []),
-        emailBody,
-        emailBody.replace(/<[^>]*>/g, '').slice(0, 500),
-        now,
-        inReplyTo || null,
-        references ? JSON.stringify(references) : null,
-        emailBody.replace(/<[^>]*>/g, '').slice(0, 200),
-        now, now
-      ]
-    );
+    const emailDoc: EmailDoc = {
+      _id: emailId,
+      accountId,
+      threadId: finalThreadId,
+      messageId: sentMessageId || emailId,
+      subject,
+      from: { name: account.name, email: account.email },
+      to,
+      cc: cc || [],
+      bcc: bcc || [],
+      replyTo: null,
+      body: emailBody,
+      bodyText: emailBody.replace(/<[^>]*>/g, '').slice(0, 500),
+      attachments: [],
+      labels: [],
+      isRead: true,
+      isStarred: false,
+      isImportant: false,
+      isArchived: false,
+      isDeleted: false,
+      isDraft: false,
+      priority: 'normal',
+      date: now,
+      inReplyTo: inReplyTo || null,
+      references: references || null,
+      snippet: emailBody.replace(/<[^>]*>/g, '').slice(0, 200),
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await emailsCol.insertOne(emailDoc);
 
     res.json({ success: true, data: { id: emailId, threadId: finalThreadId }, message: '이메일을 전송했습니다' });
+  })
+);
+
+// GET /api/emails/thread/:threadId
+router.get(
+  '/thread/:threadId',
+  asyncHandler(async (req: Request, res: Response) => {
+    const col = getCollection<EmailDoc>('emails');
+    const accountsCol = getCollection<AccountDoc>('accounts');
+    const docs = await col
+      .find({ threadId: req.params.threadId, isDeleted: false } as Parameters<typeof col.find>[0])
+      .sort({ date: 1 })
+      .toArray();
+
+    if (docs.length === 0) throw new AppError('스레드를 찾을 수 없습니다', 404);
+
+    const accountCache = new Map<string, string>();
+    const emails = await Promise.all(docs.map(async doc => {
+      let accountEmail = accountCache.get(doc.accountId);
+      if (!accountEmail) {
+        const acc = await accountsCol.findOne({ _id: doc.accountId });
+        accountEmail = acc?.email;
+        if (accountEmail) accountCache.set(doc.accountId, accountEmail);
+      }
+      return docToEmail(doc, accountEmail);
+    }));
+
+    const threads = buildThreads(emails);
+    const thread = threads[0];
+
+    res.json({ success: true, data: thread } as ApiResponse<Thread>);
+  })
+);
+
+// GET /api/emails/:id
+router.get(
+  '/:id',
+  asyncHandler(async (req: Request, res: Response) => {
+    const col = getCollection<EmailDoc>('emails');
+    const accountsCol = getCollection<AccountDoc>('accounts');
+    const doc = await col.findOne({ _id: req.params.id } as Parameters<typeof col.findOne>[0]);
+
+    if (!doc) throw new AppError('이메일을 찾을 수 없습니다', 404);
+
+    const acc = await accountsCol.findOne({ _id: doc.accountId });
+    res.json({ success: true, data: docToEmail(doc, acc?.email) } as ApiResponse<Email>);
   })
 );
 
@@ -338,16 +518,16 @@ router.post(
 router.patch(
   '/:id/read',
   asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
+    const col = getCollection<EmailDoc>('emails');
     const { isRead = true } = req.body;
     const now = new Date().toISOString();
 
-    const result = await db.run(
-      'UPDATE emails SET is_read = ?, updated_at = ? WHERE id = ?',
-      [isRead ? 1 : 0, now, req.params.id]
+    const result = await col.updateOne(
+      { _id: req.params.id } as Parameters<typeof col.updateOne>[0],
+      { $set: { isRead: Boolean(isRead), updatedAt: now } }
     );
 
-    if (result.changes === 0) throw new AppError('이메일을 찾을 수 없습니다', 404);
+    if (result.matchedCount === 0) throw new AppError('이메일을 찾을 수 없습니다', 404);
     res.json({ success: true, message: `이메일을 ${isRead ? '읽음' : '읽지 않음'}으로 표시했습니다` });
   })
 );
@@ -356,16 +536,16 @@ router.patch(
 router.patch(
   '/:id/star',
   asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
+    const col = getCollection<EmailDoc>('emails');
     const { isStarred = true } = req.body;
     const now = new Date().toISOString();
 
-    const result = await db.run(
-      'UPDATE emails SET is_starred = ?, updated_at = ? WHERE id = ?',
-      [isStarred ? 1 : 0, now, req.params.id]
+    const result = await col.updateOne(
+      { _id: req.params.id } as Parameters<typeof col.updateOne>[0],
+      { $set: { isStarred: Boolean(isStarred), updatedAt: now } }
     );
 
-    if (result.changes === 0) throw new AppError('이메일을 찾을 수 없습니다', 404);
+    if (result.matchedCount === 0) throw new AppError('이메일을 찾을 수 없습니다', 404);
     res.json({ success: true, message: `이메일을 ${isStarred ? '중요' : '중요 해제'}로 표시했습니다` });
   })
 );
@@ -374,13 +554,13 @@ router.patch(
 router.patch(
   '/:id/important',
   asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
+    const col = getCollection<EmailDoc>('emails');
     const { isImportant = true } = req.body;
     const now = new Date().toISOString();
 
-    await db.run(
-      'UPDATE emails SET is_important = ?, updated_at = ? WHERE id = ?',
-      [isImportant ? 1 : 0, now, req.params.id]
+    await col.updateOne(
+      { _id: req.params.id } as Parameters<typeof col.updateOne>[0],
+      { $set: { isImportant: Boolean(isImportant), updatedAt: now } }
     );
 
     res.json({ success: true, message: '이메일 중요도가 변경되었습니다' });
@@ -391,13 +571,13 @@ router.patch(
 router.patch(
   '/:id/archive',
   asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
+    const col = getCollection<EmailDoc>('emails');
     const { isArchived = true } = req.body;
     const now = new Date().toISOString();
 
-    await db.run(
-      'UPDATE emails SET is_archived = ?, updated_at = ? WHERE id = ?',
-      [isArchived ? 1 : 0, now, req.params.id]
+    await col.updateOne(
+      { _id: req.params.id } as Parameters<typeof col.updateOne>[0],
+      { $set: { isArchived: Boolean(isArchived), updatedAt: now } }
     );
 
     res.json({ success: true, message: `이메일을 ${isArchived ? '보관' : '보관 해제'}했습니다` });
@@ -408,14 +588,17 @@ router.patch(
 router.delete(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
-    const { permanent = false } = req.query;
+    const col = getCollection<EmailDoc>('emails');
+    const { permanent = 'false' } = req.query as Record<string, string>;
     const now = new Date().toISOString();
 
     if (permanent === 'true') {
-      await db.run('DELETE FROM emails WHERE id = ?', [req.params.id]);
+      await col.deleteOne({ _id: req.params.id } as Parameters<typeof col.deleteOne>[0]);
     } else {
-      await db.run('UPDATE emails SET is_deleted = 1, updated_at = ? WHERE id = ?', [now, req.params.id]);
+      await col.updateOne(
+        { _id: req.params.id } as Parameters<typeof col.updateOne>[0],
+        { $set: { isDeleted: true, updatedAt: now } }
+      );
     }
 
     res.json({ success: true, message: '이메일을 삭제했습니다' });
@@ -428,19 +611,22 @@ router.post(
   [body('labelId').notEmpty()],
   validate,
   asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
+    const col = getCollection<EmailDoc>('emails');
+    const labelsCol = getCollection<{ _id: string }>('labels');
     const { labelId } = req.body;
 
-    const email = await db.get('SELECT id FROM emails WHERE id = ?', [req.params.id]);
+    const email = await col.findOne({ _id: req.params.id } as Parameters<typeof col.findOne>[0]);
     if (!email) throw new AppError('이메일을 찾을 수 없습니다', 404);
 
-    const label = await db.get('SELECT id FROM labels WHERE id = ?', [labelId]);
+    const label = await labelsCol.findOne({ _id: labelId } as Parameters<typeof labelsCol.findOne>[0]);
     if (!label) throw new AppError('라벨을 찾을 수 없습니다', 404);
 
-    await db.run(
-      'INSERT INTO email_labels (email_id, label_id) VALUES (?, ?) ON CONFLICT DO NOTHING',
-      [req.params.id, labelId]
+    const now = new Date().toISOString();
+    await col.updateOne(
+      { _id: req.params.id } as Parameters<typeof col.updateOne>[0],
+      { $addToSet: { labels: labelId }, $set: { updatedAt: now } } as Parameters<typeof col.updateOne>[1]
     );
+
     res.json({ success: true, message: '라벨을 추가했습니다' });
   })
 );
@@ -449,11 +635,14 @@ router.post(
 router.delete(
   '/:id/labels/:labelId',
   asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
-    await db.run(
-      'DELETE FROM email_labels WHERE email_id = ? AND label_id = ?',
-      [req.params.id, req.params.labelId]
+    const col = getCollection<EmailDoc>('emails');
+    const now = new Date().toISOString();
+
+    await col.updateOne(
+      { _id: req.params.id } as Parameters<typeof col.updateOne>[0],
+      { $pull: { labels: req.params.labelId }, $set: { updatedAt: now } } as Parameters<typeof col.updateOne>[1]
     );
+
     res.json({ success: true, message: '라벨을 제거했습니다' });
   })
 );
@@ -462,110 +651,16 @@ router.delete(
 router.patch(
   '/thread/:threadId/read',
   asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
+    const col = getCollection<EmailDoc>('emails');
     const { isRead = true } = req.body;
     const now = new Date().toISOString();
 
-    await db.run(
-      'UPDATE emails SET is_read = ?, updated_at = ? WHERE thread_id = ?',
-      [isRead ? 1 : 0, now, req.params.threadId]
+    await col.updateMany(
+      { threadId: req.params.threadId } as Parameters<typeof col.updateMany>[0],
+      { $set: { isRead: Boolean(isRead), updatedAt: now } }
     );
 
     res.json({ success: true, message: '스레드를 읽음으로 표시했습니다' });
-  })
-);
-
-// GET /api/emails/search - Search emails
-router.get(
-  '/search/results',
-  asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
-    const { q, accountId, page = '1', limit = '50' } = req.query as Record<string, string>;
-
-    if (!q) {
-      res.json({ success: true, data: { data: [], total: 0, page: 1, limit: 50, totalPages: 0 } });
-      return;
-    }
-
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-    const likeQ = `%${q}%`;
-
-    let baseWhere = 'e.is_deleted = 0 AND (e.subject LIKE ? OR e.from_address LIKE ? OR e.body_text LIKE ?)';
-    const searchParams: unknown[] = [likeQ, likeQ, likeQ];
-
-    if (accountId) {
-      baseWhere += ' AND e.account_id = ?';
-      searchParams.push(accountId);
-    }
-
-    const countResult = await db.get<{ total: number }>(
-      `SELECT COUNT(DISTINCT e.id) as total FROM emails e WHERE ${baseWhere}`,
-      searchParams
-    );
-
-    const rows = await db.all<EmailRow>(
-      `SELECT DISTINCT e.* FROM emails e WHERE ${baseWhere} ORDER BY e.date DESC LIMIT ? OFFSET ?`,
-      [...searchParams, parseInt(limit), offset]
-    );
-
-    const emails = await Promise.all(rows.map(rowToEmail));
-
-    res.json({
-      success: true,
-      data: {
-        data: emails,
-        total: countResult?.total ?? 0,
-        page: parseInt(page),
-        limit: parseInt(limit),
-        totalPages: Math.ceil((countResult?.total ?? 0) / parseInt(limit)),
-      },
-    });
-  })
-);
-
-// POST /api/emails/batch - Batch operations
-router.post(
-  '/batch',
-  [
-    body('ids').isArray({ min: 1 }).withMessage('이메일 ID 목록을 입력해주세요'),
-    body('action').isIn(['read', 'unread', 'star', 'unstar', 'archive', 'unarchive', 'delete', 'restore']).withMessage('올바른 작업을 선택해주세요'),
-  ],
-  validate,
-  asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
-    const { ids, action } = req.body;
-    const now = new Date().toISOString();
-
-    const placeholders = ids.map(() => '?').join(', ');
-
-    switch (action) {
-      case 'read':
-        await db.run(`UPDATE emails SET is_read = 1, updated_at = ? WHERE id IN (${placeholders})`, [now, ...ids]);
-        break;
-      case 'unread':
-        await db.run(`UPDATE emails SET is_read = 0, updated_at = ? WHERE id IN (${placeholders})`, [now, ...ids]);
-        break;
-      case 'star':
-        await db.run(`UPDATE emails SET is_starred = 1, updated_at = ? WHERE id IN (${placeholders})`, [now, ...ids]);
-        break;
-      case 'unstar':
-        await db.run(`UPDATE emails SET is_starred = 0, updated_at = ? WHERE id IN (${placeholders})`, [now, ...ids]);
-        break;
-      case 'archive':
-        await db.run(`UPDATE emails SET is_archived = 1, updated_at = ? WHERE id IN (${placeholders})`, [now, ...ids]);
-        break;
-      case 'unarchive':
-        await db.run(`UPDATE emails SET is_archived = 0, updated_at = ? WHERE id IN (${placeholders})`, [now, ...ids]);
-        break;
-      case 'delete':
-        await db.run(`UPDATE emails SET is_deleted = 1, updated_at = ? WHERE id IN (${placeholders})`, [now, ...ids]);
-        break;
-      case 'restore':
-        await db.run(`UPDATE emails SET is_deleted = 0, updated_at = ? WHERE id IN (${placeholders})`, [now, ...ids]);
-        break;
-    }
-
-    res.json({ success: true, message: `${ids.length}개 이메일에 작업을 수행했습니다` });
   })
 );
 

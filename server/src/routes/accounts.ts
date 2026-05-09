@@ -1,35 +1,56 @@
 import { Router, Request, Response } from 'express';
 import { body, param } from 'express-validator';
 import { v4 as uuidv4 } from 'uuid';
-import { getDb, convertToNumberedParams } from '../db/database';
+import { getCollection, getDb, getClient } from '../db/database';
 import { validate } from '../middleware/validate';
 import { asyncHandler, AppError } from '../middleware/errorHandler';
 import { getAuthUrl, exchangeCodeForTokens } from '../services/gmail';
 import { testImapConnection } from '../services/imap';
-import { Account, AccountRow, ApiResponse } from '../types';
+import { Account, ApiResponse } from '../types';
 
 const router = Router();
 
-function rowToAccount(row: AccountRow): Account {
+interface AccountDoc {
+  _id: string;
+  name: string;
+  email: string;
+  type: 'gmail' | 'imap';
+  accessToken?: string | null;
+  refreshToken?: string | null;
+  tokenExpiry?: number | null;
+  imapHost?: string | null;
+  imapPort?: number | null;
+  imapSecure?: boolean;
+  smtpHost?: string | null;
+  smtpPort?: number | null;
+  smtpSecure?: boolean;
+  password?: string | null;
+  signature?: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function docToAccount(doc: AccountDoc): Account {
   return {
-    id: row.id,
-    name: row.name,
-    email: row.email,
-    type: row.type,
-    accessToken: row.access_token || undefined,
-    refreshToken: row.refresh_token || undefined,
-    tokenExpiry: row.token_expiry || undefined,
-    imapHost: row.imap_host || undefined,
-    imapPort: row.imap_port || undefined,
-    imapSecure: row.imap_secure === 1,
-    smtpHost: row.smtp_host || undefined,
-    smtpPort: row.smtp_port || undefined,
-    smtpSecure: row.smtp_secure === 1,
-    password: row.password || undefined,
-    signature: row.signature || undefined,
-    isActive: row.is_active === 1,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    id: doc._id,
+    name: doc.name,
+    email: doc.email,
+    type: doc.type,
+    accessToken: doc.accessToken || undefined,
+    refreshToken: doc.refreshToken || undefined,
+    tokenExpiry: doc.tokenExpiry || undefined,
+    imapHost: doc.imapHost || undefined,
+    imapPort: doc.imapPort || undefined,
+    imapSecure: doc.imapSecure ?? true,
+    smtpHost: doc.smtpHost || undefined,
+    smtpPort: doc.smtpPort || undefined,
+    smtpSecure: doc.smtpSecure ?? true,
+    password: doc.password || undefined,
+    signature: doc.signature || undefined,
+    isActive: doc.isActive,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
   };
 }
 
@@ -37,17 +58,20 @@ function rowToAccount(row: AccountRow): Account {
 router.get(
   '/',
   asyncHandler(async (_req: Request, res: Response) => {
-    const db = getDb();
-    const rows = await db.all<AccountRow>('SELECT * FROM accounts ORDER BY created_at ASC');
+    const col = getCollection<AccountDoc>('accounts');
+    const emailsCol = getCollection<{ accountId: string; isRead: boolean; isDeleted: boolean; isArchived: boolean; isDraft: boolean }>('emails');
+    const docs = await col.find({}).sort({ createdAt: 1 }).toArray();
 
-    const accounts = await Promise.all(rows.map(async row => {
-      const acc = rowToAccount(row);
-      // Count unread emails
-      const unreadCount = await db.get<{ count: number }>(
-        "SELECT COUNT(*) as count FROM emails WHERE account_id = ? AND is_read = 0 AND is_deleted = 0 AND is_archived = 0 AND is_draft = 0",
-        [row.id]
-      );
-      acc.unreadCount = unreadCount?.count ?? 0;
+    const accounts = await Promise.all(docs.map(async doc => {
+      const acc = docToAccount(doc);
+      const unreadCount = await emailsCol.countDocuments({
+        accountId: doc._id,
+        isRead: false,
+        isDeleted: false,
+        isArchived: false,
+        isDraft: false,
+      });
+      acc.unreadCount = unreadCount;
       // Don't expose tokens
       delete acc.accessToken;
       delete acc.refreshToken;
@@ -64,12 +88,12 @@ router.get(
 router.get(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
-    const row = await db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [req.params.id]);
+    const col = getCollection<AccountDoc>('accounts');
+    const doc = await col.findOne({ _id: req.params.id });
 
-    if (!row) throw new AppError('계정을 찾을 수 없습니다', 404);
+    if (!doc) throw new AppError('계정을 찾을 수 없습니다', 404);
 
-    const acc = rowToAccount(row);
+    const acc = docToAccount(doc);
     delete acc.accessToken;
     delete acc.refreshToken;
     delete acc.password;
@@ -78,7 +102,7 @@ router.get(
   })
 );
 
-// POST /api/accounts/oauth/url - Get Gmail OAuth URL
+// GET /api/accounts/oauth/url - Get Gmail OAuth URL
 router.get(
   '/oauth/url',
   asyncHandler(async (_req: Request, res: Response) => {
@@ -103,28 +127,36 @@ router.get(
     }
 
     const tokens = await exchangeCodeForTokens(code);
-    const db = getDb();
+    const col = getCollection<AccountDoc>('accounts');
     const now = new Date().toISOString();
 
     // Check if account already exists
-    const existing = await db.get<AccountRow>('SELECT * FROM accounts WHERE email = ?', [tokens.email]);
+    const existing = await col.findOne({ email: tokens.email });
 
     let accountId: string;
 
     if (existing) {
       // Update tokens
-      await db.run(
-        `UPDATE accounts SET access_token = ?, refresh_token = ?, token_expiry = ?, updated_at = ? WHERE id = ?`,
-        [tokens.accessToken, tokens.refreshToken, tokens.tokenExpiry, now, existing.id]
+      await col.updateOne(
+        { _id: existing._id },
+        { $set: { accessToken: tokens.accessToken, refreshToken: tokens.refreshToken, tokenExpiry: tokens.tokenExpiry, updatedAt: now } }
       );
-      accountId = existing.id;
+      accountId = existing._id;
     } else {
       accountId = uuidv4();
-      await db.run(
-        `INSERT INTO accounts (id, name, email, type, access_token, refresh_token, token_expiry, is_active, created_at, updated_at)
-         VALUES (?, ?, ?, 'gmail', ?, ?, ?, 1, ?, ?)`,
-        [accountId, tokens.name, tokens.email, tokens.accessToken, tokens.refreshToken, tokens.tokenExpiry, now, now]
-      );
+      const newDoc: AccountDoc = {
+        _id: accountId,
+        name: tokens.name,
+        email: tokens.email,
+        type: 'gmail',
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        tokenExpiry: tokens.tokenExpiry,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      };
+      await col.insertOne(newDoc);
     }
 
     const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
@@ -156,19 +188,32 @@ router.post(
       throw new AppError(`IMAP 연결 실패: ${(err as Error).message}`, 400);
     }
 
-    const db = getDb();
+    const col = getCollection<AccountDoc>('accounts');
     const now = new Date().toISOString();
     const id = uuidv4();
 
-    await db.run(
-      `INSERT INTO accounts (id, name, email, type, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, password, signature, is_active, created_at, updated_at)
-       VALUES (?, ?, ?, 'imap', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-      [id, name, email, imapHost, imapPort, imapSecure !== false ? 1 : 0,
-       smtpHost, smtpPort, smtpSecure !== false ? 1 : 0, password, signature || null, now, now]
-    );
+    const newDoc: AccountDoc = {
+      _id: id,
+      name,
+      email,
+      type: 'imap',
+      imapHost,
+      imapPort,
+      imapSecure: imapSecure !== false,
+      smtpHost,
+      smtpPort,
+      smtpSecure: smtpSecure !== false,
+      password,
+      signature: signature || null,
+      isActive: true,
+      createdAt: now,
+      updatedAt: now,
+    };
 
-    const row = await db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [id]);
-    const acc = rowToAccount(row!);
+    await col.insertOne(newDoc);
+
+    const doc = await col.findOne({ _id: id });
+    const acc = docToAccount(doc!);
     delete acc.password;
 
     res.status(201).json({ success: true, data: acc } as ApiResponse<Account>);
@@ -181,42 +226,30 @@ router.put(
   [param('id').notEmpty()],
   validate,
   asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
-    const existing = await db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [req.params.id]);
+    const col = getCollection<AccountDoc>('accounts');
+    const existing = await col.findOne({ _id: req.params.id });
 
     if (!existing) throw new AppError('계정을 찾을 수 없습니다', 404);
 
     const { name, signature, imapHost, imapPort, imapSecure, smtpHost, smtpPort, smtpSecure, password, isActive } = req.body;
     const now = new Date().toISOString();
 
-    await db.run(
-      `UPDATE accounts SET
-        name = COALESCE(?, name),
-        signature = COALESCE(?, signature),
-        imap_host = COALESCE(?, imap_host),
-        imap_port = COALESCE(?, imap_port),
-        imap_secure = COALESCE(?, imap_secure),
-        smtp_host = COALESCE(?, smtp_host),
-        smtp_port = COALESCE(?, smtp_port),
-        smtp_secure = COALESCE(?, smtp_secure),
-        password = COALESCE(?, password),
-        is_active = COALESCE(?, is_active),
-        updated_at = ?
-       WHERE id = ?`,
-      [
-        name || null, signature !== undefined ? signature : null,
-        imapHost || null, imapPort || null,
-        imapSecure !== undefined ? (imapSecure ? 1 : 0) : null,
-        smtpHost || null, smtpPort || null,
-        smtpSecure !== undefined ? (smtpSecure ? 1 : 0) : null,
-        password || null,
-        isActive !== undefined ? (isActive ? 1 : 0) : null,
-        now, req.params.id
-      ]
-    );
+    const updates: Record<string, unknown> = { updatedAt: now };
+    if (name !== undefined) updates.name = name;
+    if (signature !== undefined) updates.signature = signature;
+    if (imapHost !== undefined) updates.imapHost = imapHost;
+    if (imapPort !== undefined) updates.imapPort = imapPort;
+    if (imapSecure !== undefined) updates.imapSecure = imapSecure;
+    if (smtpHost !== undefined) updates.smtpHost = smtpHost;
+    if (smtpPort !== undefined) updates.smtpPort = smtpPort;
+    if (smtpSecure !== undefined) updates.smtpSecure = smtpSecure;
+    if (password !== undefined) updates.password = password;
+    if (isActive !== undefined) updates.isActive = isActive;
 
-    const row = await db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [req.params.id]);
-    const acc = rowToAccount(row!);
+    await col.updateOne({ _id: req.params.id }, { $set: updates });
+
+    const doc = await col.findOne({ _id: req.params.id });
+    const acc = docToAccount(doc!);
     delete acc.accessToken;
     delete acc.refreshToken;
     delete acc.password;
@@ -229,12 +262,12 @@ router.put(
 router.delete(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
-    const existing = await db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [req.params.id]);
+    const col = getCollection<AccountDoc>('accounts');
+    const existing = await col.findOne({ _id: req.params.id });
 
     if (!existing) throw new AppError('계정을 찾을 수 없습니다', 404);
 
-    await db.run('DELETE FROM accounts WHERE id = ?', [req.params.id]);
+    await col.deleteOne({ _id: req.params.id });
     res.json({ success: true, message: '계정이 삭제되었습니다' });
   })
 );
@@ -243,148 +276,91 @@ router.delete(
 router.post(
   '/:id/sync',
   asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
-    const row = await db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [req.params.id]);
+    const col = getCollection<AccountDoc>('accounts');
+    const doc = await col.findOne({ _id: req.params.id });
 
-    if (!row) throw new AppError('계정을 찾을 수 없습니다', 404);
+    if (!doc) throw new AppError('계정을 찾을 수 없습니다', 404);
 
-    const account = rowToAccount(row);
+    const account = docToAccount(doc);
 
     let synced = 0;
+    interface EmailDoc { _id: string; [key: string]: unknown }
+    const emailsCol = getCollection<EmailDoc>('emails');
+
     if (account.type === 'gmail') {
       const { fetchGmailMessages } = await import('../services/gmail');
       const { emails } = await fetchGmailMessages(account, { maxResults: 100 });
 
-      const insertSql = `INSERT INTO emails
-          (id, account_id, thread_id, message_id, subject, from_address, to_addresses, cc_addresses, bcc_addresses,
-           reply_to, body, body_text, attachments, is_read, is_starred, is_important, is_archived, is_deleted, is_draft,
-           priority, date, in_reply_to, email_references, snippet, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (id) DO UPDATE SET
-           account_id = EXCLUDED.account_id,
-           thread_id = EXCLUDED.thread_id,
-           message_id = EXCLUDED.message_id,
-           subject = EXCLUDED.subject,
-           from_address = EXCLUDED.from_address,
-           to_addresses = EXCLUDED.to_addresses,
-           cc_addresses = EXCLUDED.cc_addresses,
-           bcc_addresses = EXCLUDED.bcc_addresses,
-           reply_to = EXCLUDED.reply_to,
-           body = EXCLUDED.body,
-           body_text = EXCLUDED.body_text,
-           attachments = EXCLUDED.attachments,
-           is_read = EXCLUDED.is_read,
-           is_starred = EXCLUDED.is_starred,
-           is_important = EXCLUDED.is_important,
-           is_archived = EXCLUDED.is_archived,
-           is_deleted = EXCLUDED.is_deleted,
-           is_draft = EXCLUDED.is_draft,
-           priority = EXCLUDED.priority,
-           date = EXCLUDED.date,
-           in_reply_to = EXCLUDED.in_reply_to,
-           email_references = EXCLUDED.email_references,
-           snippet = EXCLUDED.snippet,
-           created_at = EXCLUDED.created_at,
-           updated_at = EXCLUDED.updated_at`;
-
-      const { sql: convertedSql } = convertToNumberedParams(insertSql);
-
-      await db.transaction(async (client) => {
-        for (const email of emails) {
-          await client.query(convertedSql, [
-            email.id, email.accountId, email.threadId, email.messageId,
-            email.subject,
-            JSON.stringify(email.from),
-            JSON.stringify(email.to),
-            JSON.stringify(email.cc),
-            JSON.stringify(email.bcc),
-            email.replyTo ? JSON.stringify(email.replyTo) : null,
-            email.body, email.bodyText,
-            JSON.stringify(email.attachments),
-            email.isRead ? 1 : 0,
-            email.isStarred ? 1 : 0,
-            email.isImportant ? 1 : 0,
-            email.isArchived ? 1 : 0,
-            email.isDeleted ? 1 : 0,
-            email.isDraft ? 1 : 0,
-            email.priority,
-            email.date,
-            email.inReplyTo || null,
-            email.references ? JSON.stringify(email.references) : null,
-            email.snippet || null,
-            email.createdAt,
-            email.updatedAt,
-          ]);
-        }
-      });
+      for (const email of emails) {
+        const emailDoc = {
+          _id: email.id,
+          accountId: email.accountId,
+          threadId: email.threadId,
+          messageId: email.messageId,
+          subject: email.subject,
+          from: email.from,
+          to: email.to,
+          cc: email.cc,
+          bcc: email.bcc,
+          replyTo: email.replyTo || null,
+          body: email.body,
+          bodyText: email.bodyText,
+          attachments: email.attachments,
+          labels: email.labels || [],
+          isRead: email.isRead,
+          isStarred: email.isStarred,
+          isImportant: email.isImportant,
+          isArchived: email.isArchived,
+          isDeleted: email.isDeleted,
+          isDraft: email.isDraft,
+          priority: email.priority,
+          date: email.date,
+          inReplyTo: email.inReplyTo || null,
+          references: email.references || null,
+          snippet: email.snippet || null,
+          createdAt: email.createdAt,
+          updatedAt: email.updatedAt,
+        };
+        await emailsCol.replaceOne({ _id: emailDoc._id as unknown as never }, emailDoc, { upsert: true });
+      }
 
       synced = emails.length;
     } else if (account.type === 'imap') {
       const { fetchImapMessages } = await import('../services/imap');
       const emails = await fetchImapMessages(account, { limit: 100 });
 
-      const insertSql = `INSERT INTO emails
-          (id, account_id, thread_id, message_id, subject, from_address, to_addresses, cc_addresses, bcc_addresses,
-           reply_to, body, body_text, attachments, is_read, is_starred, is_important, is_archived, is_deleted, is_draft,
-           priority, date, in_reply_to, email_references, snippet, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (id) DO UPDATE SET
-           account_id = EXCLUDED.account_id,
-           thread_id = EXCLUDED.thread_id,
-           message_id = EXCLUDED.message_id,
-           subject = EXCLUDED.subject,
-           from_address = EXCLUDED.from_address,
-           to_addresses = EXCLUDED.to_addresses,
-           cc_addresses = EXCLUDED.cc_addresses,
-           bcc_addresses = EXCLUDED.bcc_addresses,
-           reply_to = EXCLUDED.reply_to,
-           body = EXCLUDED.body,
-           body_text = EXCLUDED.body_text,
-           attachments = EXCLUDED.attachments,
-           is_read = EXCLUDED.is_read,
-           is_starred = EXCLUDED.is_starred,
-           is_important = EXCLUDED.is_important,
-           is_archived = EXCLUDED.is_archived,
-           is_deleted = EXCLUDED.is_deleted,
-           is_draft = EXCLUDED.is_draft,
-           priority = EXCLUDED.priority,
-           date = EXCLUDED.date,
-           in_reply_to = EXCLUDED.in_reply_to,
-           email_references = EXCLUDED.email_references,
-           snippet = EXCLUDED.snippet,
-           created_at = EXCLUDED.created_at,
-           updated_at = EXCLUDED.updated_at`;
-
-      const { sql: convertedSql } = convertToNumberedParams(insertSql);
-
-      await db.transaction(async (client) => {
-        for (const email of emails) {
-          await client.query(convertedSql, [
-            email.id, email.accountId, email.threadId, email.messageId,
-            email.subject,
-            JSON.stringify(email.from),
-            JSON.stringify(email.to),
-            JSON.stringify(email.cc),
-            JSON.stringify(email.bcc),
-            email.replyTo ? JSON.stringify(email.replyTo) : null,
-            email.body, email.bodyText,
-            JSON.stringify(email.attachments),
-            email.isRead ? 1 : 0,
-            email.isStarred ? 1 : 0,
-            email.isImportant ? 1 : 0,
-            email.isArchived ? 1 : 0,
-            email.isDeleted ? 1 : 0,
-            email.isDraft ? 1 : 0,
-            email.priority,
-            email.date,
-            email.inReplyTo || null,
-            email.references ? JSON.stringify(email.references) : null,
-            email.snippet || null,
-            email.createdAt,
-            email.updatedAt,
-          ]);
-        }
-      });
+      for (const email of emails) {
+        const emailDoc = {
+          _id: email.id,
+          accountId: email.accountId,
+          threadId: email.threadId,
+          messageId: email.messageId,
+          subject: email.subject,
+          from: email.from,
+          to: email.to,
+          cc: email.cc,
+          bcc: email.bcc,
+          replyTo: email.replyTo || null,
+          body: email.body,
+          bodyText: email.bodyText,
+          attachments: email.attachments,
+          labels: email.labels || [],
+          isRead: email.isRead,
+          isStarred: email.isStarred,
+          isImportant: email.isImportant,
+          isArchived: email.isArchived,
+          isDeleted: email.isDeleted,
+          isDraft: email.isDraft,
+          priority: email.priority,
+          date: email.date,
+          inReplyTo: email.inReplyTo || null,
+          references: email.references || null,
+          snippet: email.snippet || null,
+          createdAt: email.createdAt,
+          updatedAt: email.updatedAt,
+        };
+        await emailsCol.replaceOne({ _id: emailDoc._id as unknown as never }, emailDoc, { upsert: true });
+      }
 
       synced = emails.length;
     }

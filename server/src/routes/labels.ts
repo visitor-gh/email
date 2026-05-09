@@ -4,131 +4,85 @@ import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '../db/database';
 import { validate } from '../middleware/validate';
 import { asyncHandler, AppError } from '../middleware/errorHandler';
-import { Label, LabelRow, ApiResponse } from '../types';
+import { Label, ApiResponse } from '../types';
 
 const router = Router();
 
-function rowToLabel(row: LabelRow): Label {
-  return {
-    id: row.id,
-    accountId: row.account_id,
-    name: row.name,
-    color: row.color,
-    isSystem: row.is_system === 1,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
+interface LabelDoc extends Omit<Label, 'id'> { _id: string }
+
+function docToLabel(doc: LabelDoc): Label {
+  const { _id, ...rest } = doc;
+  return { id: _id, ...rest };
 }
 
 // GET /api/labels
-router.get(
-  '/',
-  asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
-    const { accountId } = req.query as Record<string, string>;
+router.get('/', asyncHandler(async (req: Request, res: Response) => {
+  const { accountId } = req.query as Record<string, string>;
+  const col = getDb().collection<LabelDoc>('labels');
 
-    let query = 'SELECT * FROM labels';
-    const params: unknown[] = [];
+  const filter = accountId ? { $or: [{ accountId }, { accountId: null }] } : {};
+  const docs = await col.find(filter).sort({ isSystem: -1, name: 1 }).toArray();
 
-    if (accountId) {
-      query += ' WHERE account_id = ? OR account_id IS NULL';
-      params.push(accountId);
-    }
+  const labels = await Promise.all(docs.map(async doc => {
+    const emailCount = await getDb().collection('emails').countDocuments({ labels: doc._id, isDeleted: false });
+    return { ...docToLabel(doc), emailCount };
+  }));
 
-    query += ' ORDER BY is_system DESC, name ASC';
-
-    const rows = await db.all<LabelRow>(query, params);
-    const labels = await Promise.all(rows.map(async row => {
-      const label = rowToLabel(row);
-      const result = await db.get<{ count: number }>(
-        'SELECT COUNT(*) as count FROM email_labels WHERE label_id = ?',
-        [row.id]
-      );
-      return { ...label, emailCount: result?.count ?? 0 };
-    }));
-
-    res.json({ success: true, data: labels } as ApiResponse<typeof labels>);
-  })
-);
+  res.json({ success: true, data: labels });
+}));
 
 // GET /api/labels/:id
-router.get(
-  '/:id',
-  asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
-    const row = await db.get<LabelRow>('SELECT * FROM labels WHERE id = ?', [req.params.id]);
-    if (!row) throw new AppError('라벨을 찾을 수 없습니다', 404);
-    res.json({ success: true, data: rowToLabel(row) } as ApiResponse<Label>);
-  })
-);
+router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
+  const col = getDb().collection<LabelDoc>('labels');
+  const doc = await col.findOne({ _id: req.params.id });
+  if (!doc) throw new AppError('라벨을 찾을 수 없습니다', 404);
+  res.json({ success: true, data: docToLabel(doc) } as ApiResponse<Label>);
+}));
 
 // POST /api/labels
-router.post(
-  '/',
-  [
-    body('name').notEmpty().withMessage('라벨 이름을 입력해주세요'),
-    body('color').optional().isString(),
-  ],
-  validate,
-  asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
-    const { name, color = '#6B7280', accountId } = req.body;
-    const now = new Date().toISOString();
-    const id = uuidv4();
+router.post('/', [
+  body('name').notEmpty().withMessage('라벨 이름을 입력해주세요'),
+  body('color').optional().isString(),
+], validate, asyncHandler(async (req: Request, res: Response) => {
+  const { name, color = '#6B7280', accountId } = req.body;
+  const col = getDb().collection<LabelDoc>('labels');
 
-    const existing = await db.get(
-      'SELECT id FROM labels WHERE name = ? AND (account_id = ? OR account_id IS NULL)',
-      [name, accountId || null]
-    );
-    if (existing) throw new AppError('같은 이름의 라벨이 이미 존재합니다', 409);
+  const existing = await col.findOne({ name, $or: [{ accountId: accountId || null }, { accountId: null }] });
+  if (existing) throw new AppError('같은 이름의 라벨이 이미 존재합니다', 409);
 
-    await db.run(
-      `INSERT INTO labels (id, account_id, name, color, is_system, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 0, ?, ?)`,
-      [id, accountId || null, name, color, now, now]
-    );
+  const now = new Date().toISOString();
+  const doc: LabelDoc = { _id: uuidv4(), accountId: accountId || null, name, color, isSystem: false, createdAt: now, updatedAt: now };
+  await col.insertOne(doc);
 
-    const row = await db.get<LabelRow>('SELECT * FROM labels WHERE id = ?', [id]);
-    res.status(201).json({ success: true, data: rowToLabel(row!) } as ApiResponse<Label>);
-  })
-);
+  res.status(201).json({ success: true, data: docToLabel(doc) } as ApiResponse<Label>);
+}));
 
 // PUT /api/labels/:id
-router.put(
-  '/:id',
-  [body('name').optional().notEmpty()],
-  validate,
-  asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
-    const existing = await db.get<LabelRow>('SELECT * FROM labels WHERE id = ?', [req.params.id]);
-    if (!existing) throw new AppError('라벨을 찾을 수 없습니다', 404);
-    if (existing.is_system === 1) throw new AppError('시스템 라벨은 수정할 수 없습니다', 403);
+router.put('/:id', [body('name').optional().notEmpty()], validate, asyncHandler(async (req: Request, res: Response) => {
+  const col = getDb().collection<LabelDoc>('labels');
+  const existing = await col.findOne({ _id: req.params.id });
+  if (!existing) throw new AppError('라벨을 찾을 수 없습니다', 404);
+  if (existing.isSystem) throw new AppError('시스템 라벨은 수정할 수 없습니다', 403);
 
-    const { name, color } = req.body;
-    const now = new Date().toISOString();
+  const { name, color } = req.body;
+  const updates: Partial<LabelDoc> = { updatedAt: new Date().toISOString() };
+  if (name) updates.name = name;
+  if (color) updates.color = color;
 
-    await db.run(
-      `UPDATE labels SET name = COALESCE(?, name), color = COALESCE(?, color), updated_at = ? WHERE id = ?`,
-      [name || null, color || null, now, req.params.id]
-    );
-
-    const row = await db.get<LabelRow>('SELECT * FROM labels WHERE id = ?', [req.params.id]);
-    res.json({ success: true, data: rowToLabel(row!) } as ApiResponse<Label>);
-  })
-);
+  await col.updateOne({ _id: req.params.id }, { $set: updates });
+  const updated = await col.findOne({ _id: req.params.id });
+  res.json({ success: true, data: docToLabel(updated!) } as ApiResponse<Label>);
+}));
 
 // DELETE /api/labels/:id
-router.delete(
-  '/:id',
-  asyncHandler(async (req: Request, res: Response) => {
-    const db = getDb();
-    const existing = await db.get<LabelRow>('SELECT * FROM labels WHERE id = ?', [req.params.id]);
-    if (!existing) throw new AppError('라벨을 찾을 수 없습니다', 404);
-    if (existing.is_system === 1) throw new AppError('시스템 라벨은 삭제할 수 없습니다', 403);
+router.delete('/:id', asyncHandler(async (req: Request, res: Response) => {
+  const col = getDb().collection<LabelDoc>('labels');
+  const existing = await col.findOne({ _id: req.params.id });
+  if (!existing) throw new AppError('라벨을 찾을 수 없습니다', 404);
+  if (existing.isSystem) throw new AppError('시스템 라벨은 삭제할 수 없습니다', 403);
 
-    await db.run('DELETE FROM labels WHERE id = ?', [req.params.id]);
-    res.json({ success: true, message: '라벨을 삭제했습니다' });
-  })
-);
+  await col.deleteOne({ _id: req.params.id });
+  res.json({ success: true, message: '라벨을 삭제했습니다' });
+}));
 
 export default router;

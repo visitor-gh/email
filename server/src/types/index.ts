@@ -27,27 +27,6 @@ export interface Account {
   unreadCount?: number;
 }
 
-export interface AccountRow {
-  id: string;
-  name: string;
-  email: string;
-  type: AccountType;
-  access_token: string | null;
-  refresh_token: string | null;
-  token_expiry: number | null;
-  imap_host: string | null;
-  imap_port: number | null;
-  imap_secure: number | null;
-  smtp_host: string | null;
-  smtp_port: number | null;
-  smtp_secure: number | null;
-  password: string | null;
-  signature: string | null;
-  is_active: number;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface Email {
   id: string;
   accountId: string;
@@ -77,35 +56,6 @@ export interface Email {
   snippet?: string;
   createdAt: string;
   updatedAt: string;
-}
-
-export interface EmailRow {
-  id: string;
-  account_id: string;
-  thread_id: string;
-  message_id: string;
-  subject: string;
-  from_address: string;
-  to_addresses: string;
-  cc_addresses: string;
-  bcc_addresses: string;
-  reply_to: string | null;
-  body: string;
-  body_text: string;
-  attachments: string;
-  is_read: number;
-  is_starred: number;
-  is_important: number;
-  is_archived: number;
-  is_deleted: number;
-  is_draft: number;
-  priority: Priority;
-  date: string;
-  in_reply_to: string | null;
-  email_references: string | null;
-  snippet: string | null;
-  created_at: string;
-  updated_at: string;
 }
 
 export interface Thread {
@@ -145,16 +95,6 @@ export interface Label {
   updatedAt: string;
 }
 
-export interface LabelRow {
-  id: string;
-  account_id: string | null;
-  name: string;
-  color: string;
-  is_system: number;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface EmailLabel {
   emailId: string;
   labelId: string;
@@ -175,21 +115,6 @@ export interface Draft {
   updatedAt: string;
 }
 
-export interface DraftRow {
-  id: string;
-  account_id: string;
-  subject: string;
-  to_addresses: string;
-  cc_addresses: string;
-  bcc_addresses: string;
-  body: string;
-  attachments: string;
-  in_reply_to: string | null;
-  thread_id: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface Template {
   id: string;
   name: string;
@@ -198,16 +123,6 @@ export interface Template {
   category: string;
   createdAt: string;
   updatedAt: string;
-}
-
-export interface TemplateRow {
-  id: string;
-  name: string;
-  subject: string;
-  body: string;
-  category: string;
-  created_at: string;
-  updated_at: string;
 }
 
 export interface SendEmailOptions {
